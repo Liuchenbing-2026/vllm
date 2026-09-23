@@ -64,6 +64,10 @@ class BasevLLMParameter(Parameter):
         self._weight_loader = weight_loader
         self.tp_rank = get_tensor_model_parallel_rank()
         self.tp_size = get_tensor_model_parallel_world_size()
+        if getattr(weight_loader, "__self__", None) is not None:
+            owner = weight_loader.__self__
+            self.tp_rank = getattr(owner, "tp_rank", self.tp_rank)
+            self.tp_size = getattr(owner, "tp_size", self.tp_size)
 
     @property
     def weight_loader(self) -> Callable:

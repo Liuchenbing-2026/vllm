@@ -2282,9 +2282,10 @@ class EngineCoreActorMixin:
             pass
         else:
             device_control_env_var = current_platform.device_control_env_var
-            self._set_assigned_physical_gpu_ids(
-                vllm_config, local_dp_rank, device_control_env_var
-            )
+            if os.environ.get(device_control_env_var):
+                self._set_assigned_physical_gpu_ids(
+                    vllm_config, local_dp_rank, device_control_env_var
+                )
 
     def _set_assigned_physical_gpu_ids(
         self,

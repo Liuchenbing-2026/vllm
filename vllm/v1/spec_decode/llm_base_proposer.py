@@ -102,6 +102,8 @@ class SpecDecodeBaseProposer:
             draft_hf_config, "hc_mult"
         ):
             self.hidden_size = self.hidden_size * draft_hf_config.hc_mult
+        if draft_hf_config.model_type == "qwen4_exp_mtp":
+            self.hidden_size = self.hidden_size * draft_hf_config.hc_count
 
         # Unifying eagle, draft model, and parallel drafting support.
         # DFlash always uses parallel drafting (all tokens in one pass),
@@ -1009,9 +1011,8 @@ class SpecDecodeBaseProposer:
             # DeepSeek-family MTP (deepseek_mtp.py) recycles the post-final-
             # norm hidden, so its forward returns (logit_hidden,
             # recycle_hidden). Other MTP families return a single tensor.
-            return "DeepSeekMTPModel" in (
-                self.draft_model_config.hf_config.architectures or []
-            )
+            architectures = self.draft_model_config.hf_config.architectures or []
+            return "DeepSeekMTPModel" in architectures or "Qwen4ExpMTP" in architectures
         return self.method not in ("mtp", "draft_model", "dflash")
 
     def prepare_next_token_ids_cpu(

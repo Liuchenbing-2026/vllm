@@ -782,6 +782,84 @@ class ColQwen3_5Config(Qwen3_5ForConditionalGenerationConfig):
         model_config.hf_config.is_causal = False
 
 
+def _strip_qwen4_exp_mrope(model_config: "ModelConfig") -> None:
+    configs = {
+        id(config): config
+        for config in (
+            getattr(model_config, "hf_config", None),
+            model_config.hf_text_config,
+        )
+        if config is not None
+    }
+    for config in configs.values():
+        rope_parameters = getattr(config, "rope_parameters", None)
+        if rope_parameters is not None:
+            rope_parameters.pop("mrope_section", None)
+            rope_parameters.pop("mrope_interleaved", None)
+
+
+class Qwen4ExpForConditionalGenerationConfig(Qwen3_5ForConditionalGenerationConfig):
+    """Apply the Qwen3.5 hybrid-cache contract to Qwen4Exp."""
+
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        Qwen3_5ForConditionalGenerationConfig.verify_and_update_config(vllm_config)
+        text_config = vllm_config.model_config.hf_text_config
+        text_config.layer_types = [
+            "full_attention" if layer_type == "qwen_sparse_attention" else layer_type
+            for layer_type in text_config.layer_types
+        ]
+        text_config.ple_layer_ids = []
+        text_config.indexer_n_heads = None
+        text_config.indexer_kv_heads = None
+        text_config.indexer_head_dim = None
+        text_config.indexer_budget = None
+        text_config.indexer_compress_ratio = None
+        if text_config.hc_count <= 1:
+            raise ValueError("Qwen4Exp requires hc_count > 1")
+        parallel_config = vllm_config.parallel_config
+        uses_ple_or_qsa = bool(text_config.ple_layer_ids) or (
+            getattr(text_config, "indexer_n_heads", None) is not None
+        )
+        if uses_ple_or_qsa and (
+            parallel_config.enable_dbo or parallel_config.ubatch_size > 1
+        ):
+            raise NotImplementedError(
+                "Qwen4Exp PLE/QSA does not support dual-batch overlap or microbatching"
+            )
+        multimodal_config = vllm_config.model_config.multimodal_config
+        if multimodal_config is not None and multimodal_config.language_model_only:
+            _strip_qwen4_exp_mrope(vllm_config.model_config)
+        spec_config = vllm_config.speculative_config
+        if spec_config is not None and spec_config.method not in {
+            "mtp",
+            "ngram",
+            "ngram_gpu",
+        }:
+            raise NotImplementedError(
+                "Qwen4Exp speculative decoding supports only its native MTP "
+                "checkpoint and linear n-gram proposers"
+            )
+
+
+class Qwen4ExpForCausalLMConfig(Qwen4ExpForConditionalGenerationConfig):
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        Qwen4ExpForConditionalGenerationConfig.verify_and_update_config(vllm_config)
+        _strip_qwen4_exp_mrope(vllm_config.model_config)
+
+
+class Qwen4ExpMTPConfig(Qwen4ExpForConditionalGenerationConfig):
+    """Preserve MRoPE for a VL target and use 1D RoPE for a text target."""
+
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        Qwen4ExpForConditionalGenerationConfig.verify_and_update_config(vllm_config)
+        if hasattr(vllm_config.model_config.hf_config, "vision_config"):
+            return
+        _strip_qwen4_exp_mrope(vllm_config.model_config)
+
+
 class SnowflakeGteNewModelConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
@@ -862,6 +940,9 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "Qwen3VLForSequenceClassification": Qwen3VLForSequenceClassificationConfig,
     "Qwen3_5ForConditionalGeneration": Qwen3_5ForConditionalGenerationConfig,
     "Qwen3_5MoeForConditionalGeneration": Qwen3_5ForConditionalGenerationConfig,
+    "Qwen4ExpForCausalLM": Qwen4ExpForCausalLMConfig,
+    "Qwen4ExpForConditionalGeneration": Qwen4ExpForConditionalGenerationConfig,
+    "Qwen4ExpMTP": Qwen4ExpMTPConfig,
     "UnlimitedOCRForCausalLM": UnlimitedOCRForCausalLMConfig,
     "VoyageQwen3BidirectionalEmbedModel": VoyageQwen3BidirectionalEmbedModelConfig,
     "XLMRobertaModel": JinaRobertaModelConfig,

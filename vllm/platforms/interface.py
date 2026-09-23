@@ -329,6 +329,8 @@ class Platform:
             cls.device_control_id_to_physical_device_id(physical_id)
             for physical_id in device_control_env.split(",")
         ]
+        if len(visible_physical_device_ids) == 1:
+            return device_id
         if physical_device_id not in visible_physical_device_ids:
             raise RuntimeError(
                 f"Physical device {physical_device_id} for logical device "

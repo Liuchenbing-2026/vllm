@@ -61,6 +61,7 @@ WEIGHT_LOADER_V2_SUPPORTED = [
     "ModelOptNvFp4LinearMethod",
     "ModelOptNvFp4W4A16LinearMethod",
     "HummingLinearMethod",
+    "AscendUnquantizedLinearMethod",
 ]
 
 

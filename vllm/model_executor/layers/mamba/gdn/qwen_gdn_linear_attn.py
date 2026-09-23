@@ -57,6 +57,56 @@ from vllm.third_party.flash_linear_attention.ops.chunk import l2norm_fwd
 from vllm.third_party.flash_linear_attention.ops.utils import FLA_CHUNK_SIZE
 from vllm.transformers_utils.configs.qwen3_next import Qwen3NextConfig
 from vllm.triton_utils import tl, triton
+
+
+# --- QWEN38_GDN_GLUE -------------------------------------------------------
+# See patch_gdn_glue.py for the launch-count and timing evidence behind this.
+# 0 = upstream split+cat (default), 1 = three contiguous() copies, 2 = one
+# Triton pack kernel.  Read once at import; a round changes it via --env.
+import os as _os
+
+_GDN_GLUE = _os.environ.get("QWEN38_GDN_GLUE", "0")
+_PACK_BLOCK = 2048
+
+
+@triton.jit
+def _pack_qkv_kernel(
+    src_ptr,
+    dst_ptr,
+    total,
+    row_stride,
+    q_size,
+    k_size,
+    q_dim: tl.constexpr,
+    k_dim: tl.constexpr,
+    v_dim: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    """Pack [seq, q|k|v] into [all q][all k][all v] in one launch.
+
+    ``o`` is the destination index.  The source index is the same index
+    remapped into the packed row layout: section offset inside the row, plus
+    ``o // dim`` rows of ``row_stride``.  Equivalent to split+cat, which is
+    why mode 1 and mode 2 produce bit-identical buffers for every seq_len.
+    """
+    pid = tl.program_id(0)
+    offs = pid * BLOCK + tl.arange(0, BLOCK)
+    mask = offs < total
+    o_k = offs - q_size
+    o_v = o_k - k_size
+    src = tl.where(
+        offs < q_size,
+        (offs // q_dim) * row_stride + (offs % q_dim),
+        tl.where(
+            offs < q_size + k_size,
+            (o_k // k_dim) * row_stride + q_dim + (o_k % k_dim),
+            (o_v // v_dim) * row_stride + q_dim + k_dim + (o_v % v_dim),
+        ),
+    )
+    tl.store(dst_ptr + offs, tl.load(src_ptr + src, mask=mask), mask=mask)
+
+
+# --- end QWEN38_GDN_GLUE ---------------------------------------------------
 from vllm.utils.torch_utils import (
     LayerNameType,
     _encode_layer_name,
@@ -746,18 +796,61 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         k_dim = self.key_dim // self.tp_size
         v_dim = self.value_dim // self.tp_size
 
-        query, key, value = torch.split(mixed_qkv, [q_dim, k_dim, v_dim], dim=-1)
-
-        fused = torch.cat(
-            [query.reshape(-1), key.reshape(-1), value.reshape(-1)], dim=0
+        # NOTE: a "the input is contiguous so ``reshape(-1)`` is equivalent"
+        # fast path was tried and is WRONG.  The packed layout is
+        # ``[seq, q | k | v]``, i.e. the three sections are interleaved per
+        # token, while the fused buffer the split+cat produces is
+        # ``[all q][all k][all v]``.  ``mixed_qkv.reshape(-1)`` therefore
+        # reorders the streams for any ``seq_len > 1`` (measured on the
+        # v41 box: spec acceptance collapsed from ~10900 to 171 accepted
+        # tokens at C16, 258 tok/s vs 517).  Keep the split+cat.
+        query, key, value = torch.split(
+            mixed_qkv, [q_dim, k_dim, v_dim], dim=-1
         )
-
+        # QWEN38_GDN_GLUE (patch_gdn_glue.py).  q_size/k_size are needed by
+        # every branch, so they are hoisted; the three branches differ only in
+        # how the [all q][all k][all v] buffer is produced.
         q_size = seq_len * q_dim
         k_size = seq_len * k_dim
 
-        q_contig = fused[0:q_size]
-        k_contig = fused[q_size : q_size + k_size]
-        v_contig = fused[q_size + k_size :]
+        if _GDN_GLUE == "1":
+            # Drop the cat.  torch.split already gives the three streams; each
+            # reshape materialises a contiguous copy, and the cat that used to
+            # follow re-copied those same three blocks into one buffer only for
+            # the slices below to take views of it.
+            q_contig = query.reshape(-1).contiguous()
+            k_contig = key.reshape(-1).contiguous()
+            v_contig = value.reshape(-1).contiguous()
+        elif _GDN_GLUE == "2" and mixed_qkv.stride(1) == 1:
+            # One launch straight from the packed buffer.  Same destination
+            # layout as the cat, so the same three slices still work.
+            total = q_size + k_size + seq_len * v_dim
+            fused = torch.empty(
+                total, dtype=mixed_qkv.dtype, device=mixed_qkv.device
+            )
+            _pack_qkv_kernel[(triton.cdiv(total, _PACK_BLOCK),)](
+                mixed_qkv,
+                fused,
+                total,
+                mixed_qkv.stride(0),
+                q_size,
+                k_size,
+                q_dim=q_dim,
+                k_dim=k_dim,
+                v_dim=v_dim,
+                BLOCK=_PACK_BLOCK,
+            )
+            q_contig = fused[0:q_size]
+            k_contig = fused[q_size : q_size + k_size]
+            v_contig = fused[q_size + k_size :]
+        else:
+            fused = torch.cat(
+                [query.reshape(-1), key.reshape(-1), value.reshape(-1)], dim=0
+            )
+
+            q_contig = fused[0:q_size]
+            k_contig = fused[q_size : q_size + k_size]
+            v_contig = fused[q_size + k_size :]
 
         query = q_contig.view(1, seq_len, -1, self.head_k_dim)
         key = k_contig.view(1, seq_len, -1, self.head_k_dim)

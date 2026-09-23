@@ -17,6 +17,7 @@ from vllm.utils.torch_utils import (
     STR_DTYPE_TO_TORCH_DTYPE,
     get_kv_cache_torch_dtype,
 )
+from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 
 logger = init_logger(__name__)
 
@@ -192,9 +193,10 @@ class MambaStateShapeCalculator:
         tp_world_size: int,
         intermediate_size: int,
         conv_kernel: int,
+        num_spec: int = 0,
     ) -> tuple[tuple[int, int]]:
         conv_dim = divide(intermediate_size, tp_world_size)
-        conv_state_shape = cls._orient_conv_shape(conv_dim, conv_kernel - 1)
+        conv_state_shape = cls._orient_conv_shape(conv_dim, conv_kernel - 1 + num_spec)
         return (conv_state_shape,)
 
     @classmethod
@@ -221,6 +223,11 @@ class MambaStateShapeCalculator:
         num_spec: int = 0,
     ):
         conv_dim = head_k_dim * num_k_heads * 2 + head_v_dim * num_v_heads
+        if conv_dim % tp_world_size:
+            head_k_dim_multiplier = head_k_dim
+            while (head_k_dim * num_k_heads * 2 + head_v_dim * num_v_heads) % tp_world_size:
+                head_k_dim += head_k_dim_multiplier
+            conv_dim = head_k_dim * num_k_heads * 2 + head_v_dim * num_v_heads
         conv_state_shape = cls._orient_conv_shape(
             divide(conv_dim, tp_world_size),
             conv_kernel_size - 1 + num_spec,
@@ -287,6 +294,11 @@ Parameters:
   num_accepted_tokens: int - number of accepted tokens used to compute the copy offset.
       Range: 1 .. 1 + num_speculative_tokens (inclusive).
 """
+
+MambaStateCopyFuncs: TypeAlias = tuple[MambaStateCopyFunc, ...]
+MambaStateCopyFuncsByType: TypeAlias = dict[
+    MambaAttentionBackendEnum, MambaStateCopyFuncs
+]
 
 
 def get_conv_copy_spec(
