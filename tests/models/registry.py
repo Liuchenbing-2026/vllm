@@ -745,6 +745,7 @@ _SEQUENCE_CLASSIFICATION_EXAMPLE_MODELS = {
         hf_overrides={"architectures": ["GteNewForSequenceClassification"]},
     ),
     "JambaForSequenceClassification": _HfExamplesInfo("ai21labs/Jamba-tiny-reward-dev"),
+    "LayaForDecision": _HfExamplesInfo("convaiinnovations/laya"),
     "LlamaBidirectionalForSequenceClassification": _HfExamplesInfo(
         "nvidia/llama-nemotron-rerank-1b-v2", trust_remote_code=True
     ),
