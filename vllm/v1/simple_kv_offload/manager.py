@@ -97,6 +97,8 @@ class StoreRequestState:
     block_ids: tuple[list[int], ...]
     # Per-group cursors tracking how many blocks have been stored/skipped.
     num_stored_blocks: list[int]
+    # Positions can become hashable after the async scheduling step scans them.
+    pending_unhashed_blocks: dict[int, set[int]] = field(default_factory=dict)
     store_events: set[int] = field(default_factory=set)
     finished: bool = False
 
@@ -282,11 +284,16 @@ class SimpleCPUOffloadScheduler:
             for t in gpu_config.kv_cache_tensors
         ]
 
-        return replace(
+        cpu_config = replace(
             gpu_config,
             num_blocks=num_cpu_blocks,
             kv_cache_tensors=cpu_tensors,
         )
+        # Hardware plugins can attach coordinator metadata to the config.
+        # dataclasses.replace only copies declared fields.
+        if hasattr(gpu_config, "kv_transfer_config"):
+            cpu_config.kv_transfer_config = gpu_config.kv_transfer_config
+        return cpu_config
 
     @staticmethod
     def _estimate_lazy_target_blocks(
@@ -727,6 +734,7 @@ class SimpleCPUOffloadScheduler:
             if preempted:
                 state.block_ids = tuple([] for _ in range(num_groups))
                 state.num_stored_blocks = [0] * num_groups
+                state.pending_unhashed_blocks.clear()
             if new_block_id_groups:
                 for g in range(min(num_groups, len(new_block_id_groups))):
                     if new_block_id_groups[g] is not None:
@@ -820,9 +828,15 @@ class SimpleCPUOffloadScheduler:
         # reachable fine-grained boundary, so the other groups would hold that
         # boundary and this one would not, and the joint hybrid lookup would
         # reconcile to zero.
+        # EAGLE lookups also need the confirmed verifier block beyond the
+        # aligned prefix, even when the accepted hit itself is LCM-aligned.
         store_alignment = (
             self.hash_block_size
             if self.cpu_coordinator.enable_partial_hash_hits
+            or any(
+                manager.use_eagle
+                for manager in self.cpu_coordinator.single_type_managers
+            )
             else self.block_size
         )
         aligned_tokens = confirmed_tokens // store_alignment * store_alignment
@@ -832,7 +846,12 @@ class SimpleCPUOffloadScheduler:
             if len(gpu_block_ids) >= num_free:
                 break
             group_manager = self.cpu_coordinator.single_type_managers[g]
-            if not group_manager.has_positionally_stable_blocks:
+            if (
+                not group_manager.has_positionally_stable_blocks
+                or not self.cpu_kv_cache_config.kv_cache_groups[
+                    g
+                ].kv_cache_spec.prefix_cacheable
+            ):
                 continue
             # FIXME (yifan): handle CPU cache eviction, where
             # num_stored_blocks can be stale and omit evicted blocks in
@@ -845,31 +864,29 @@ class SimpleCPUOffloadScheduler:
             curr_mm_idx = 0
             secondary_mm_idx = 0
             start = state.num_stored_blocks[g]
-            for i, gpu_block_id in enumerate(group_gpu_ids[start:ready], start=start):
-                gpu_block = self._gpu_block_pool.blocks[gpu_block_id]
-                if gpu_block.is_null:
-                    # Sliding-window groups null pages that left the window
-                    # before the connector sees the block table, but the
-                    # retained prefix-cache tail stays hashed in the GPU free
-                    # queue; store it from there.
-                    recovered = self._cached_gpu_block(resolved_hashes, i, g)
-                    if recovered is None:
-                        advanced_per_group[g] += 1
-                        continue
-                    gpu_block = recovered
-                    gpu_block_id = gpu_block.block_id
+            pending = state.pending_unhashed_blocks.setdefault(g, set())
+            positions = sorted(pending | set(range(start, ready)))
+            for i in positions:
+                if len(gpu_block_ids) >= num_free:
+                    break
+                # Resolve by hash, not a remembered physical ID: SWA can recycle
+                # that ID for a different token range before this scan retries.
+                gpu_block = self._cached_gpu_block(resolved_hashes, i, g)
+                if gpu_block is None:
+                    pending.add(i)
+                    advanced_per_group[g] += int(i >= start)
+                    continue
+                pending.discard(i)
+                advanced_per_group[g] += int(i >= start)
                 if (
                     self._classify_store_candidate(gpu_block)
                     is not _StoreAdmission.READY
                 ):
-                    advanced_per_group[g] += 1
                     continue
-                if len(gpu_block_ids) >= num_free:
-                    break
+                gpu_block_id = gpu_block.block_id
                 primary_block_hash = gpu_block.block_hash
                 assert primary_block_hash is not None
                 gpu_block_ids.append(gpu_block_id)
-                advanced_per_group[g] += 1
                 if block_meta is not None:
                     token_start = i * group_size
                     token_end = token_start + group_size
