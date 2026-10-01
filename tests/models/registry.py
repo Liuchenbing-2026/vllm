@@ -717,6 +717,14 @@ _REWARD_EXAMPLE_MODELS = {
 
 _TOKEN_CLASSIFICATION_EXAMPLE_MODELS = {
     "BertForTokenClassification": _HfExamplesInfo("boltuix/NeuroBERT-NER"),
+    "InternDecisionForTokenClassification": _HfExamplesInfo(
+        "internlm/Intern-Decision-0.8B",
+        hf_overrides={
+            "architectures": ["InternDecisionForTokenClassification"],
+            "head_dtype": "model",
+        },
+        min_transformers_version="5.14.1",
+    ),
     "ModernBertForTokenClassification": _HfExamplesInfo(
         "disham993/electrical-ner-ModernBERT-base"
     ),

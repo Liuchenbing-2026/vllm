@@ -294,6 +294,10 @@ _REWARD_MODELS = {
 
 _TOKEN_CLASSIFICATION_MODELS = {
     "BertForTokenClassification": ("bert", "BertForTokenClassification"),
+    "InternDecisionForTokenClassification": (
+        "intern_decision",
+        "InternDecisionForTokenClassification",
+    ),
     "ModernBertForTokenClassification": (
         "modernbert",
         "ModernBertForTokenClassification",

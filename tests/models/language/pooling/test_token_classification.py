@@ -1,9 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
+
 import pytest
 import torch
-from transformers import AutoModelForMaskedLM, AutoModelForTokenClassification
+from transformers import (
+    AutoModelForMaskedLM,
+    AutoModelForTokenClassification,
+    Qwen3_5ForConditionalGeneration,
+)
 
 from tests.models.registry import HF_EXAMPLE_MODELS
 from tests.models.utils import softmax
@@ -19,6 +25,99 @@ def seed_everything():
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
     yield
+
+
+@pytest.mark.core_model
+@torch.inference_mode()
+def test_intern_decision_matches_hf_next_token_logits(hf_runner, vllm_runner):
+    """Guard marker alignment and field ordering using real trained weights."""
+    model = "internlm/Intern-Decision-0.8B"
+    prompts = []
+    expected = []
+    with hf_runner(
+        model, dtype="bfloat16", auto_cls=Qwen3_5ForConditionalGeneration
+    ) as hf_model:
+        tokenizer = hf_model.tokenizer
+        # Match the trained schema and complete assistant skeleton, including
+        # the tokenizer's empty think block. Bare marker strings omit this contract.
+        system = (
+            "You are a careful decision assistant. "
+            "Use the state and decision schema in "
+            "the user message to make the requested decisions. For every field, choose "
+            "exactly one answer symbol (e.g. A, B, C, ...) from its listed options and "
+            "return one valid JSON object mapping each field name "
+            "to its chosen symbol. "
+            "Use the field names and symbols exactly as given. Do not include "
+            "explanations, Markdown, or extra text."
+        )
+        schemas = [
+            "color: What color is the sky?\n    A = blue: Blue\n    B = red: Red",
+            "temperature: Is the ice warm or cold?\n"
+            "    A = warm: Warm\n    B = cold: Cold",
+        ]
+        for fields in (("color",), ("color", "temperature")):
+            user = (
+                "Return one answer for every field "
+                "using the supplied answer symbols.\n\n"
+                '## State\n"The sky is blue and the ice is cold."\n## Decision schema\n'
+                + "\n".join(schemas[: len(fields)])
+            )
+            prompts.append(
+                tokenizer.apply_chat_template(
+                    [
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": user},
+                        {
+                            "role": "assistant",
+                            "content": json.dumps(
+                                dict.fromkeys(fields, "<decision>"), indent=4
+                            ),
+                        },
+                    ],
+                    tokenize=False,
+                    add_generation_prompt=False,
+                    enable_thinking=False,
+                )
+            )
+        marker = tokenizer.convert_tokens_to_ids("<decision>")
+        symbols = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+        symbol_ids = [tokenizer.encode(s, add_special_tokens=False)[0] for s in symbols]
+        for prompt in prompts:
+            inputs = hf_model.wrap_device(
+                tokenizer(prompt, add_special_tokens=False, return_tensors="pt")
+            )
+            positions = (inputs["input_ids"][0] == marker).nonzero().flatten() - 1
+            logits = hf_model.model(
+                **inputs, use_cache=False, logits_to_keep=positions
+            ).logits[0]
+            expected.append(logits[:, symbol_ids].float().cpu())
+    with vllm_runner(
+        model,
+        runner="pooling",
+        dtype="bfloat16",
+        max_model_len=512,
+        hf_overrides={
+            "architectures": ["InternDecisionForTokenClassification"],
+            "head_dtype": "model",
+        },
+        limit_mm_per_prompt={"image": 0, "video": 0},
+        enable_prefix_caching=False,
+    ) as vllm_model:
+        outputs = vllm_model.llm.encode(
+            prompts,
+            pooling_task="token_classify",
+            tokenization_kwargs={"add_special_tokens": False},
+        )
+    for reference, output in zip(expected, outputs):
+        actual = output.outputs.data.float().cpu()
+        assert actual.shape == reference.shape
+        # Normalize only each field's two candidates, never the full vocabulary.
+        torch.testing.assert_close(
+            actual[:, :2].softmax(-1),
+            reference[:, :2].softmax(-1),
+            atol=2e-2,
+            rtol=1e-2,
+        )
 
 
 @pytest.mark.parametrize(

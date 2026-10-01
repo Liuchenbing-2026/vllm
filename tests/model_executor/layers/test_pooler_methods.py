@@ -25,6 +25,7 @@ from vllm.model_executor.layers.pooler.tokwise.methods import (
     StepPool,
     get_tok_pooling_method,
 )
+from vllm.model_executor.models.intern_decision import InternDecisionPooler
 from vllm.pooling_params import PoolingParams
 from vllm.v1.pool.metadata import PoolingCursor, PoolingMetadata, PoolingStates
 
@@ -346,6 +347,65 @@ def test_dispatch_seq_cls_honors_token_pooling_type(tok_pooling_type):
     assert pooler.get_pooling_updates("token_classify").requires_token_ids == (
         tok_pooling_type == "STEP"
     )
+
+
+@pytest.mark.skip_global_cleanup
+class TestInternDecisionPooler:
+    @staticmethod
+    def make_pooler(chunked=False):
+        config = _FakeVllmConfig(
+            scheduler_config=_FakeSchedulerConfig(enable_chunked_prefill=chunked)
+        )
+        with patch(
+            "vllm.model_executor.layers.pooler.tokwise.methods.get_current_vllm_config",
+            return_value=config,
+        ):
+            return InternDecisionPooler(lambda hidden: hidden * 2, 99, [2, 0])
+
+    def test_scores_preceding_positions_without_crossing_requests(self):
+        pooler = self.make_pooler()
+        metadata = _make_metadata(
+            [5, 3],
+            tasks=["token_classify"] * 2,
+            token_ids=[[1, 99, 2, 99, 3], [4, 5, 99]],
+        )
+        hidden = torch.arange(24, dtype=torch.float).reshape(8, 3)
+        output = pooler(hidden, metadata)
+        torch.testing.assert_close(output[0], 2 * hidden[[0, 2]][:, [2, 0]])
+        torch.testing.assert_close(output[1], 2 * hidden[[6]][:, [2, 0]])
+
+    def test_marker_at_chunk_boundary_uses_previous_chunk(self):
+        pooler = self.make_pooler(chunked=True)
+        first = _make_metadata(
+            [4],
+            tasks=["token_classify"],
+            token_ids=[[1, 2, 99, 3]],
+            num_scheduled_tokens=[2],
+            seq_lens=[2],
+        )
+        hidden = torch.arange(12, dtype=torch.float).reshape(4, 3)
+        assert pooler(hidden[:2], first) == [None]
+        last = _make_metadata(
+            [4],
+            tasks=["token_classify"],
+            token_ids=[[1, 2, 99, 3]],
+            num_scheduled_tokens=[2],
+            seq_lens=[4],
+        )
+        last.pooling_states = first.pooling_states
+        torch.testing.assert_close(
+            pooler(hidden[2:], last)[0], 2 * hidden[[1]][:, [2, 0]]
+        )
+        assert last.pooling_states[0].hidden_states_cache == []
+
+    def test_leading_marker_rejected_instead_of_negative_indexing(self):
+        metadata = _make_metadata(
+            [2],
+            tasks=["token_classify"],
+            token_ids=[[99, 1]],
+        )
+        with pytest.raises(ValueError, match="preceding token"):
+            self.make_pooler()(torch.ones(2, 3), metadata)
 
 
 class TestAllPool:
