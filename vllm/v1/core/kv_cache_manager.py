@@ -15,11 +15,12 @@ from vllm.v1.core.kv_cache_coordinator import (
 )
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import KVCacheBlock, KVCacheBlockCopy
-from vllm.v1.core.single_type_kv_cache_manager import MambaManager
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager, MambaManager
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     CrossAttentionSpec,
     EncoderOnlyAttentionSpec,
+    FullAttentionSpec,
     KVCacheConfig,
     MambaSpec,
     get_kv_cache_spec_kind,
@@ -204,6 +205,21 @@ class KVCacheManager:
             if manager.retains_longer_hit
         )
         self.kv_cache_config = kv_cache_config
+        self._decode_noop_manager: FullAttentionManager | None = None
+        if (
+            self.num_kv_cache_groups == 1
+            and not use_eagle
+            and num_prefill_lookahead == 0
+            and dcp_world_size == pcp_world_size == 1
+            and metrics_collector is None
+            and not enable_kv_cache_events
+        ):
+            manager = self.coordinator.single_type_managers[0]
+            if (
+                type(manager) is FullAttentionManager
+                and type(manager.kv_cache_spec) is FullAttentionSpec
+            ):
+                self._decode_noop_manager = manager
 
         # Watermark: minimum number of KV cache blocks to keep free when
         # admitting waiting/preempted requests, to avoid frequent preemptions.
@@ -470,6 +486,34 @@ class KVCacheManager:
                 "num_new_tokens must be greater than 0 when there are no "
                 "external computed tokens"
             )
+
+        manager = self._decode_noop_manager
+        if (
+            manager is not None
+            and num_new_tokens == 1
+            and num_new_computed_tokens == 0
+            and new_computed_blocks is None
+            and num_lookahead_tokens == 0
+            and num_external_computed_tokens == 0
+            and num_encoder_tokens == 0
+            and not delay_cache_blocks
+            and not full_sequence_must_fit
+            and reserved_blocks == 0
+            and request.status == RequestStatus.RUNNING
+            and 0 <= request.num_computed_tokens < self.max_model_len
+        ):
+            request_id = request.request_id
+            num_tokens = request.num_computed_tokens + 1
+            blocks = manager.req_to_blocks.get(request_id)
+            if (
+                blocks is not None
+                and num_tokens <= len(blocks) * manager.block_size
+                and request_id not in manager._partial_hit_reqs
+                and manager.num_cached_block.get(request_id, -1)
+                >= min(num_tokens, request.num_tokens) // manager.block_size
+            ):
+                # No eviction, allocation, CoW, or full-block cache publication.
+                return self.empty_kv_cache_blocks
 
         if new_computed_blocks is not None:
             new_computed_block_list = new_computed_blocks.blocks

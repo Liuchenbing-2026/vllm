@@ -5952,3 +5952,71 @@ def test_device_eviction_keeps_host_prefix():
     assert host_block.block_hash is not None, (
         "Device eviction invalidated unrelated host KV"
     )
+
+
+@pytest.mark.parametrize("block_size", [8, 16, 128])
+@pytest.mark.parametrize("prompt_offset", [-1, 0, 1])
+@pytest.mark.parametrize("in_flight", [0, 2])
+def test_decode_noop_preserves_blocks_hashes_and_reuse(
+    block_size, prompt_offset, in_flight
+):
+    """Skipping empty work must preserve future allocation and prefix hits."""
+    managers = [
+        make_kv_cache_manager(
+            make_kv_cache_config(block_size, 32),
+            max_model_len=8192,
+            enable_caching=True,
+            hash_block_size=block_size,
+        )
+        for _ in range(2)
+    ]
+    managers[0]._decode_noop_manager = None
+
+    def snapshot(manager):
+        single = manager.coordinator.single_type_managers[0]
+        return (
+            [(b.block_id, b.ref_cnt, b.block_hash) for b in manager.block_pool.blocks],
+            [
+                b.block_id
+                for b in manager.block_pool.free_block_queue.get_all_free_blocks()
+            ],
+            {
+                key: [b.block_id for b in blocks]
+                for key, blocks in single.req_to_blocks.items()
+            },
+            dict(single.num_cached_block),
+            list(single.new_block_ids),
+        )
+
+    prompt = list(range(block_size + prompt_offset))
+    for cycle in range(2):
+        requests = [
+            make_request(str(cycle), prompt, block_size, sha256) for _ in managers
+        ]
+        results = []
+        for manager, request in zip(managers, requests):
+            computed, count, _ = manager.get_computed_blocks(request)
+            result = manager.allocate_slots(
+                request,
+                len(prompt) - count + in_flight,
+                num_new_computed_tokens=count,
+                new_computed_blocks=computed,
+            )
+            results.append(result.get_block_ids())
+            request.num_computed_tokens = len(prompt) + in_flight
+            request.num_output_placeholders = in_flight
+            request.status = RequestStatus.RUNNING
+        assert results[0] == results[1]
+        assert snapshot(managers[0]) == snapshot(managers[1])
+        for step in range(block_size * 2 + 3):
+            results = []
+            for manager, request in zip(managers, requests):
+                request.append_output_token_ids([100 + step % 17])
+                result = manager.allocate_slots(request, 1)
+                results.append(result.get_block_ids())
+                request.num_computed_tokens += 1
+            assert results[0] == results[1]
+            assert snapshot(managers[0]) == snapshot(managers[1])
+        for manager, request in zip(managers, requests):
+            manager.free(request)
+        assert snapshot(managers[0]) == snapshot(managers[1])
