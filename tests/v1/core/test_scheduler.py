@@ -4051,6 +4051,52 @@ def test_scheduler_no_ec_connector_by_default():
     assert scheduler.ec_connector is None
 
 
+@pytest.mark.parametrize(
+    "computed,new,shift,encoder_decoder,expected",
+    [
+        (0, 8, 0, False, [0]),
+        (7, 1, 0, False, [0]),
+        (8, 1, 0, False, []),
+        (15, 1, 1, False, [1]),
+        (23, 1, 0, False, [1]),
+        (24, 1, 0, False, []),
+        (25, 1, 1, False, []),
+        (0, 0, 0, False, []),
+        (0, 1, 0, True, [0]),
+        (1, 1, 0, True, []),
+        (8, 1, 0, True, []),
+    ],
+)
+def test_encoder_schedule_consumed_feature_boundaries(
+    computed, new, shift, encoder_decoder, expected
+):
+    """Consumed images must not change token budgets or touch encoder caches."""
+    scheduler = Scheduler.__new__(Scheduler)
+    scheduler.is_encoder_decoder = encoder_decoder
+    scheduler.scheduler_config = SimpleNamespace(disable_chunked_mm_input=False)
+    scheduler.ec_connector = None
+    scheduler.encoder_cache_manager = Mock()
+    scheduler.encoder_cache_manager.check_and_update_cache.return_value = False
+    scheduler.encoder_cache_manager.can_allocate.return_value = True
+    offsets = [0] if encoder_decoder else [0, 16]
+    request = Mock(
+        has_encoder_inputs=True,
+        mm_features=[
+            MultiModalFeatureSpec(
+                data=None,
+                modality="image",
+                identifier=f"image-{offset}",
+                mm_position=PlaceholderRange(offset=offset, length=8),
+            )
+            for offset in offsets
+        ],
+    )
+    result = scheduler._try_schedule_encoder_inputs(request, computed, new, 100, shift)
+    assert result == (expected, new, 100 - 8 * len(expected), [])
+    if not expected:
+        assert scheduler.encoder_cache_manager.mock_calls == []
+
+
 def test_mamba_align_encoder_cache_cap_makes_progress():
     """Two individually cacheable images must not deadlock Mamba alignment."""
     block_size = 768

@@ -1699,10 +1699,15 @@ class Scheduler(SchedulerInterface):
         """
         if num_new_tokens == 0 or not request.has_encoder_inputs:
             return [], num_new_tokens, encoder_compute_budget, []
-        encoder_inputs_to_schedule: list[int] = []
         mm_features = request.mm_features
         assert mm_features is not None
         assert len(mm_features) > 0
+        last_position = mm_features[-1].mm_position
+        if not self.is_encoder_decoder and num_computed_tokens >= (
+            last_position.offset + last_position.length
+        ):
+            return [], num_new_tokens, encoder_compute_budget, []
+        encoder_inputs_to_schedule: list[int] = []
         external_load_encoder_input = []
 
         # NOTE: since scheduler operates on the request level (possibly with
