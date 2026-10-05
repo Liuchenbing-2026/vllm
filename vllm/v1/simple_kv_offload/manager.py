@@ -4,6 +4,7 @@
 
 import contextlib
 from collections.abc import Iterable
+from copy import copy
 from dataclasses import dataclass, field, replace
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Any
@@ -284,15 +285,11 @@ class SimpleCPUOffloadScheduler:
             for t in gpu_config.kv_cache_tensors
         ]
 
-        cpu_config = replace(
-            gpu_config,
-            num_blocks=num_cpu_blocks,
-            kv_cache_tensors=cpu_tensors,
-        )
-        # Hardware plugins can attach coordinator metadata to the config.
-        # dataclasses.replace only copies declared fields.
-        if hasattr(gpu_config, "kv_transfer_config"):
-            cpu_config.kv_transfer_config = gpu_config.kv_transfer_config
+        # Preserve coordinator metadata attached by hardware plugins as well
+        # as declared fields; dataclasses.replace drops dynamic attributes.
+        cpu_config = copy(gpu_config)
+        cpu_config.num_blocks = num_cpu_blocks
+        cpu_config.kv_cache_tensors = cpu_tensors
         return cpu_config
 
     @staticmethod
@@ -865,7 +862,26 @@ class SimpleCPUOffloadScheduler:
             secondary_mm_idx = 0
             start = state.num_stored_blocks[g]
             pending = state.pending_unhashed_blocks.setdefault(g, set())
-            positions = sorted(pending | set(range(start, ready)))
+            positions = sorted(
+                i for i in pending | set(range(start, ready)) if i < ready
+            )
+            if not positions:
+                continue
+            reachable_boundaries = [
+                *self.cpu_coordinator.get_replay_boundaries(request)
+            ]
+            if request.shared_prefix_boundary:
+                reachable_boundaries.append(request.shared_prefix_boundary)
+            block_mask = group_manager.reachable_block_mask(
+                start_block=positions[0],
+                end_block=ready,
+                alignment_tokens=group_manager.cache_hit_alignment_tokens,
+                kv_cache_spec=group_manager.kv_cache_spec,
+                use_eagle=group_manager.use_eagle,
+                retention_interval=self.cpu_coordinator.retention_interval,
+                reachable_boundaries=reachable_boundaries,
+                dcp_world_size=group_manager.dcp_world_size,
+            )
             for i in positions:
                 if len(gpu_block_ids) >= num_free:
                     break
@@ -873,7 +889,11 @@ class SimpleCPUOffloadScheduler:
                 # that ID for a different token range before this scan retries.
                 gpu_block = self._cached_gpu_block(resolved_hashes, i, g)
                 if gpu_block is None:
-                    pending.add(i)
+                    # Sparse retention deliberately never publishes other pages.
+                    if block_mask is None or block_mask[i - positions[0]]:
+                        pending.add(i)
+                    else:
+                        pending.discard(i)
                     advanced_per_group[g] += int(i >= start)
                     continue
                 pending.discard(i)
