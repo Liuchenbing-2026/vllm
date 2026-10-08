@@ -111,8 +111,10 @@ class ExtractHiddenStatesProposer:
             target_hidden_states: List of hidden state tensors from target model
                                 (one per aux hidden state layer)
             common_attn_metadata: Attention metadata
-            slot_mappings: Slot mappings for KV cache (unused, provided for
-                          interface compatibility)
+            slot_mappings: Slot mappings for the KV cache, keyed by attention
+                          layer name (this is what the model runner passes in).
+                          Used to locate the mapping that belongs to this
+                          cache-only layer's own KV cache group.
 
         Returns:
             Tuple of:
@@ -162,7 +164,8 @@ class ExtractHiddenStatesProposer:
             num_tokens_across_dp=num_tokens_across_dp,
             cudagraph_runtime_mode=cudagraph_runtime_mode,
             slot_mapping=self._get_slot_mapping(
-                num_input_tokens, common_attn_metadata.slot_mapping
+                num_input_tokens,
+                self._resolve_slot_mapping(slot_mappings, common_attn_metadata),
             ),
         ):
             self.model(
@@ -175,6 +178,56 @@ class ExtractHiddenStatesProposer:
         # shape [batch_size, 2] (target + spec verification); slice to
         # return only the target-sampled column.
         return sampled_token_ids[:, :1]
+
+    def _resolve_slot_mapping(
+        self,
+        slot_mappings: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None,
+        common_attn_metadata: CommonAttentionMetadata,
+    ) -> torch.Tensor:
+        """Slot mapping that belongs to THIS cache-only layer's KV cache group.
+
+        The cache-only layers may live in a KV cache group whose block size
+        differs from the group that produced
+        ``common_attn_metadata.slot_mapping``.  Writing with the wrong block
+        size scatters the cache updates across blocks that were never allocated
+        to the request, so the later read returns mostly zeros plus a handful of
+        bf16-overflow NaN/Inf values.
+
+        Resolution order:
+        1. ``slot_mappings`` supplied by the model runner (keyed by layer name).
+        2. The runner's own block table for this layer's KV cache group.
+        3. ``common_attn_metadata.slot_mapping`` as a last resort.
+        """
+        # 1) Per-layer mapping supplied by the runner.
+        if isinstance(slot_mappings, dict):
+            for layer_name in self.attn_layer_names:
+                mapping = slot_mappings.get(layer_name)
+                if mapping is not None:
+                    return mapping
+        elif isinstance(slot_mappings, list):
+            for group in slot_mappings:
+                if not isinstance(group, dict):
+                    continue
+                for layer_name in self.attn_layer_names:
+                    mapping = group.get(layer_name)
+                    if mapping is not None:
+                        return mapping
+
+        # 2) The runner's block table, built with this group's own block size.
+        runner = getattr(self, "runner", None)
+        kv_cache_gid = getattr(self, "kv_cache_gid", -1)
+        if runner is not None and isinstance(kv_cache_gid, int) and kv_cache_gid >= 0:
+            try:
+                num_actual = getattr(common_attn_metadata, "num_actual_tokens", None)
+                if num_actual is None:
+                    num_actual = common_attn_metadata.slot_mapping.shape[0]
+                block_table = runner.input_batch.block_table[kv_cache_gid]
+                return block_table.slot_mapping.gpu[:num_actual]
+            except (AttributeError, IndexError, TypeError):
+                pass
+
+        # 3) Last resort: whatever metadata the caller handed us.
+        return common_attn_metadata.slot_mapping
 
     def _get_slot_mapping(
         self,
