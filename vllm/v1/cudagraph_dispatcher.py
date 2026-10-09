@@ -95,6 +95,7 @@ class CudagraphDispatcher:
         if (
             self.compilation_config.compile_sizes
             and self.cudagraph_mode != CUDAGraphMode.NONE
+            and self.compilation_config.cudagraph_allow_padding
         ):
             for size in self.compilation_config.compile_sizes:
                 size = int(size)
@@ -303,6 +304,16 @@ class CudagraphDispatcher:
         batch_desc = self._create_padded_batch_descriptor(
             num_tokens, normalized_uniform, has_lora, effective_num_active_loras
         )
+
+        if (
+            not self.compilation_config.cudagraph_allow_padding
+            and batch_desc.num_tokens != num_tokens
+        ):
+            assert CUDAGraphMode.NONE in allowed_modes, (
+                f"No matching cudagraph found and NONE is not in "
+                f"allowed_modes={allowed_modes}"
+            )
+            return CUDAGraphMode.NONE, BatchDescriptor(num_tokens)
 
         if CUDAGraphMode.FULL in allowed_modes:
             # check if key exists for full cudagraph

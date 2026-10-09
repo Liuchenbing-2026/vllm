@@ -656,6 +656,13 @@ class CompilationConfig:
     """Sizes to capture cudagraph.
     - None (default): capture sizes are inferred from vllm config.
     - list[int]: capture sizes are specified as given."""
+    cudagraph_allow_padding: bool = True
+    """Allow rounding token counts up to a captured graph size.
+
+    If False, only exact token-count matches use a graph; other batches run
+    without graph replay. This avoids graph-induced shape changes in workloads
+    sensitive to shape-dependent floating-point differences.
+    """
     cudagraph_copy_inputs: bool = False
     """Whether to copy input tensors for
     cudagraph. If the caller can guarantee that the same input buffers
