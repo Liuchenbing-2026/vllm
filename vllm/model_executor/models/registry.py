@@ -340,6 +340,10 @@ _SEQUENCE_CLASSIFICATION_MODELS = {
         "nemotron_vl",
         "LlamaNemotronVLForSequenceClassification",
     ),
+    "PplxDeciderForSequenceClassification": (
+        "pplx_decider",
+        "PplxDeciderForSequenceClassification",
+    ),
 }
 
 _MULTIMODAL_MODELS = {

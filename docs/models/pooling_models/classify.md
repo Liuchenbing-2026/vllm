@@ -42,6 +42,7 @@ The most fundamental application of classification models is to categorize input
 
 | Architecture | Models | Inputs | Example HF Models | [LoRA](../../features/lora.md) | [PP](../../serving/parallelism_scaling.md) |
 | ------------ | ------ | ------ | ----------------- | ------------------------------ | ------------------------------------------ |
+| `PplxDeciderForSequenceClassification` | Perplexity Decider | T + I | `perplexity-ai/pplx-decider-v1.1-27b` (export required) | | |
 | `Qwen2_5_VLForSequenceClassification`<sup>C</sup> | Qwen2_5_VL-based | T + I<sup>E+</sup> + V<sup>E+</sup> | `muziyongshixin/Qwen2.5-VL-7B-for-VideoCls` | | |
 | `*ForConditionalGeneration`<sup>C</sup>, `*ForCausalLM`<sup>C</sup>, etc. | Generative models | \* | N/A | \* | \* |
 
@@ -64,6 +65,24 @@ Using (sequence) classification models as reward models. For more information, s
 --8<-- "docs/models/pooling_models/reward.md:supported-sequence-reward-models"
 
 ## Offline Inference
+
+### Perplexity Decider
+
+Decider returns raw logits from a separate decision readout. Its full-attention
+layers are bidirectional, while its linear-attention recurrence remains causal.
+Disable prefix caching and chunked prefill for complete-request classification.
+Pipeline parallelism is not supported by this implementation.
+
+The original checkpoint stores the readout separately from the backbone. Create
+a local vLLM view with
+[prepare_pplx_decider.py](../../../examples/pooling/classify/prepare_pplx_decider.py);
+this preserves the original files and links the backbone shards without copying
+them. Use
+[serve_pplx_decider.py](../../../examples/pooling/classify/serve_pplx_decider.py)
+with the checkpoint's official `source/src` directory on `PYTHONPATH` to preserve
+prompt construction and answer formatting. Restrict logits to the request's
+ordered candidates, then apply the checkpoint temperature and softmax once.
+Do not interpret the raw `/classify` output as calibrated probabilities.
 
 ### Pooling Parameters
 
