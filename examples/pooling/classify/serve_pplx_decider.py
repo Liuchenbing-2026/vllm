@@ -117,6 +117,7 @@ def main():
     parser.add_argument("--model", required=True)
     parser.add_argument("--port", type=int, default=18210)
     parser.add_argument("--tensor-parallel-size", type=int, default=2)
+    parser.add_argument("--gpu-memory-utilization", type=float, default=0.85)
     parser.add_argument("--max-model-len", type=int, default=8192)
     parser.add_argument("--enforce-eager", action="store_true")
     parser.add_argument("--compilation-config", type=json.loads)
@@ -127,7 +128,7 @@ def main():
         max_model_len=args.max_model_len,
         max_num_batched_tokens=args.max_model_len,
         max_num_seqs=8,
-        gpu_memory_utilization=0.85,
+        gpu_memory_utilization=args.gpu_memory_utilization,
         enforce_eager=args.enforce_eager,
         compilation_config=args.compilation_config,
     )
