@@ -336,6 +336,10 @@ _SEQUENCE_CLASSIFICATION_MODELS = {
         "nemotron_vl",
         "LlamaNemotronVLForSequenceClassification",
     ),
+    "StartLuxDecisionMoeForSequenceClassification": (
+        "startlux_decision",
+        "StartLuxDecisionMoeForSequenceClassification",
+    ),
 }
 
 _MULTIMODAL_MODELS = {
