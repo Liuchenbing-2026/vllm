@@ -69,6 +69,7 @@ if TYPE_CHECKING:
         MultiModalPromptUpdates,
         ResolvedPromptUpdate,
     )
+    from vllm.tokenizers.segment_cache import SegmentTokenizerCache
 
     from .inputs import DictPrompt
     from .params import ChatParams
@@ -793,6 +794,7 @@ def safe_apply_chat_template(
     chat_template: str | None = None,
     tokenize: bool = True,
     return_assistant_tokens_mask: bool = False,
+    tokenizer_cache: SegmentTokenizerCache | None = None,
     **kwargs,
 ) -> str | list[int] | tuple[list[int], list[int] | None]:
     chat_template = resolve_chat_template(
@@ -863,6 +865,26 @@ def safe_apply_chat_template(
         resolved_kwargs["return_dict"] = False
 
     try:
+        if (
+            tokenizer_cache is not None
+            and tokenizer_cache.enabled
+            and tokenize
+            and not return_assistant_tokens_mask
+            and not any(
+                resolved_kwargs.get(key)
+                for key in ("return_dict", "return_tensors", "padding", "truncation")
+            )
+        ):
+            text = tokenizer.apply_chat_template(
+                conversation=conversation,
+                tools=tools,
+                chat_template=chat_template,
+                tokenize=False,
+                **resolved_kwargs,
+            )
+            ids = tokenizer_cache.encode(text, add_special_tokens=False)
+            if ids is not None:
+                return ids
         plain = tokenizer.apply_chat_template(
             conversation=conversation,  # type: ignore[arg-type]
             tools=tools,  # type: ignore[arg-type]
@@ -1078,6 +1100,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
                 model_config,
                 tokenizer,
                 conversation,
+                tokenizer_cache=self._tokenizer_cache,
                 **chat_template_kwargs,
             )
 
@@ -1203,6 +1226,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
                 model_config,
                 tokenizer,
                 conversation,
+                tokenizer_cache=self._tokenizer_cache,
                 **chat_template_kwargs,
             )
 
