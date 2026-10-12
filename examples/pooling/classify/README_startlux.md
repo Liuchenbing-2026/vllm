@@ -169,3 +169,48 @@ accuracy or proof of numerical equivalence. The saved reference used a different
 parallel configuration; this comparison does not isolate the source of the
 probability differences. The tolerance was retained and its failure recorded.
 The v0.30 full-suite score must not be attributed to this v0.26 branch.
+
+## Incremental exact-length graph execution
+
+The optional graph change applies on top of this v0.26 eager implementation.
+It adds `CompilationConfig.cudagraph_allow_padding`, defaulting to `True` to
+preserve existing behavior. With `False`, only captured token counts use graph
+replay. Other counts retain their original shape and use a non-graph path;
+dispatch raises if that fallback is explicitly excluded by the caller.
+The model, selected candidate head and temperature handling are unchanged.
+No additional Ascend source change or environment variable is required.
+
+For a paired comparison, keep the checkpoint, devices, TP size, input order and
+these existing environment settings identical in both modes:
+
+```bash
+export VLLM_ENABLE_V1_MULTIPROCESSING=0
+export HCCL_DETERMINISTIC=true LCCL_DETERMINISTIC=1
+export ATB_MATMUL_SHUFFLE_K_ENABLE=0 ATB_LLM_LCOC_ENABLE=0
+```
+
+Replace `--enforce-eager` in the serving command with:
+
+```bash
+--compilation-config '{"mode":3,"cudagraph_mode":"PIECEWISE","cudagraph_capture_sizes":[256,384,512,768,891,1024,2048,4096],"cudagraph_allow_padding":false}'
+```
+
+This option also applies to the patched model behind standard `vllm serve
+--runner pooling`; retain raw-logit classification and the same client-side
+candidate mapping and calibration. Captured sizes are workload settings, not
+model constants. A successful service start does not prove actual graph replay.
+
+Dispatcher regression coverage includes captured and uncaptured lengths,
+default padding, compile-only sizes, and callers that prohibit graph fallback:
+
+```bash
+.venv/bin/python -m pytest tests/v1/cudagraph/test_cudagraph_dispatch.py \
+  --confcutdir=tests/v1/cudagraph -k TestCudagraphDispatcher -q
+```
+
+The dispatcher tests passed (20 cases); reverting the dispatch behavior while
+retaining the new configuration and tests reproduces six failures. Hardware
+graph replay, paired seven-suite probability comparison and performance are
+being verified separately on the fixed v0.26 environment. Until those finish,
+the graph extension is not a completed hardware acceptance result. Retain the
+original absolute probability tolerance of 0.001 and zero changed decisions.
