@@ -65,3 +65,28 @@ A variety of EAGLE draft models are available on the Hugging Face hub:
 
 !!! warning
     If you are using `vllm<0.7.0`, please use [this script](https://gist.github.com/abhigoyal1997/1e7a4109ccb7704fbc67f625e86b2d6d) to convert the speculative model and specify `"model": "path/to/modified/eagle/model"` in `speculative_config`.
+
+## RoPE for EAGLE Drafts
+
+An EAGLE draft builds its rotary embedding from the draft checkpoint's own
+`config.json`. vLLM does not copy the target model's rope keys into the draft,
+so a draft config that omits them runs at base `10000` with `rope_type=default`
+no matter what the target uses. vLLM logs the draft's resolved base and
+`rope_type` at startup, and warns when they differ from the target's:
+
+```text
+WARNING ... Draft model RoPE (base=10000, rope_type='default') differs from the
+target model's (base=500000.0, rope_type='llama3'). EAGLE drafts read RoPE from
+the draft config only, so a draft checkpoint that omits the rope keys silently
+falls back to base 10000 with no scaling.
+```
+
+A mismatch is not automatically an error — some EAGLE heads are trained against
+base `10000` on purpose and are self-consistent there, which is why vLLM never
+rewrites the draft's value. But when a checkpoint's config merely omits the
+keys, the fallback can be wrong for a target that uses long-context scaling
+(`rope_theta=500000` for Llama 3.1/3.3, YaRN, ...), and the draft's proposals
+degrade. If you see this warning, either serve a draft that pins the target's
+rope (for example `yuhuili/EAGLE-LLaMA3.1-Instruct-8B`, which sets
+`"rope_theta": 500000.0`), or add the target's rope keys to the draft's
+`config.json`.
