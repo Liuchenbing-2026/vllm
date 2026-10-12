@@ -62,6 +62,50 @@ def test_growing_history_matches_full_encoding(tokenizer, specials, body):
     assert 0 < cache.bytes_used <= cache.capacity
 
 
+@pytest.mark.parametrize(
+    "options", [{"return_offsets_mapping": True}, {"max_length": 1}]
+)
+def test_chat_tokenizer_options_keep_regular_semantics(tokenizer, options):
+    from types import SimpleNamespace
+
+    from vllm.renderers.hf import (
+        VLLMValidationError,
+        _apply_chat_template_with_cache,
+        safe_apply_chat_template,
+    )
+
+    cache = SegmentTokenizerCache(tokenizer, 0.001)
+    kwargs = dict(
+        chat_template=(
+            "{% for m in messages %}<|start|>{{ m.content }}<|end|>{% endfor %}"
+        ),
+        tokenizer_kwargs=options,
+    )
+    messages = [{"role": "user", "content": "hello world"}]
+    if "max_length" in options:
+        # HF rejects a duplicate tokenizer option; the cache must not hide it.
+        with pytest.raises(VLLMValidationError) as regular_error:
+            safe_apply_chat_template(SimpleNamespace(), tokenizer, messages, **kwargs)
+        with pytest.raises(VLLMValidationError) as cached_error:
+            _apply_chat_template_with_cache(
+                cache, SimpleNamespace(), tokenizer, messages, **kwargs
+            )
+        assert isinstance(regular_error.value.__cause__, TypeError)
+        assert isinstance(cached_error.value.__cause__, TypeError)
+        assert str(cached_error.value) == str(regular_error.value)
+    else:
+        regular = safe_apply_chat_template(
+            SimpleNamespace(), tokenizer, messages, **kwargs
+        )
+        assert (
+            _apply_chat_template_with_cache(
+                cache, SimpleNamespace(), tokenizer, messages, **kwargs
+            )
+            == regular
+        )
+    assert cache.lookups == 0
+
+
 def test_concurrent_and_returned_list_mutation_preserve_ids(tokenizer):
     cache = SegmentTokenizerCache(tokenizer, 0.001)
     texts = [f"hello<|end|>{i}你好<|end|>tail" for i in range(40)]
@@ -192,7 +236,10 @@ def test_chat_cache_matches_regular_template_for_each_request(
 ):
     from types import SimpleNamespace
 
-    from vllm.renderers.hf import safe_apply_chat_template
+    from vllm.renderers.hf import (
+        _apply_chat_template_with_cache,
+        safe_apply_chat_template,
+    )
 
     cache = SegmentTokenizerCache(tokenizer, 0.001)
     messages = [{"role": "user", "content": "hello 你好"}]
@@ -205,8 +252,34 @@ def test_chat_cache_matches_regular_template_for_each_request(
             SimpleNamespace(), tokenizer, messages, **kwargs
         )
         for _ in range(2):
-            actual = safe_apply_chat_template(
-                SimpleNamespace(), tokenizer, messages, tokenizer_cache=cache, **kwargs
+            actual = _apply_chat_template_with_cache(
+                cache, SimpleNamespace(), tokenizer, messages, **kwargs
             )
             assert actual == regular
     assert cache.hits > 0
+
+
+def test_cache_context_does_not_consume_template_variables(tokenizer):
+    from types import SimpleNamespace
+
+    from vllm.renderers.hf import (
+        _apply_chat_template_with_cache,
+        safe_apply_chat_template,
+    )
+
+    cache = SegmentTokenizerCache(tokenizer, 0.001)
+    messages = [{"role": "user", "content": "hello"}]
+    kwargs = dict(
+        chat_template="<|start|>{{ tokenizer_cache }}<|end|>",
+        tokenizer_cache="hello world",
+    )
+    regular = safe_apply_chat_template(SimpleNamespace(), tokenizer, messages, **kwargs)
+    assert regular == tokenizer.encode(
+        "<|start|>hello world<|end|>", add_special_tokens=False
+    )
+    assert (
+        _apply_chat_template_with_cache(
+            cache, SimpleNamespace(), tokenizer, messages, **kwargs
+        )
+        == regular
+    )
