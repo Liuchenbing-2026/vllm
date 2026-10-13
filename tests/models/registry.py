@@ -752,6 +752,12 @@ _SEQUENCE_CLASSIFICATION_EXAMPLE_MODELS = {
     "RobertaForSequenceClassification": _HfExamplesInfo(
         "cross-encoder/quora-roberta-base"
     ),
+    "StartLuxDecisionForSequenceClassification": _HfExamplesInfo(
+        "startlux-models/StartLux-Decision-4B",
+        hf_overrides={"architectures": ["StartLuxDecisionForSequenceClassification"]},
+        enable_prefix_caching=False,
+        max_model_len=8192,
+    ),
     "StartLuxDecisionMoeForSequenceClassification": _HfExamplesInfo(
         "startlux-models/StartLux-Decision-35B-A3B",
         hf_overrides={

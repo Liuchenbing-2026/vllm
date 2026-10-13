@@ -46,6 +46,55 @@ class TestStartLuxDecisionPooler(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "single tokens"):
                 StartLuxDecisionMoeForSequenceClassification(vllm_config=config)
 
+    def test_dense_checkpoint_initializes_and_loads_candidate_head(self):
+        from vllm.model_executor.models.qwen3_5 import Qwen3_5ForConditionalGeneration
+        from vllm.model_executor.models.startlux_decision import (
+            StartLuxDecisionForSequenceClassification,
+        )
+
+        config = SimpleNamespace(
+            parallel_config=SimpleNamespace(pipeline_parallel_size=1),
+            model_config=SimpleNamespace(get_hidden_size=lambda: 4),
+        )
+        tokenizer = SimpleNamespace(
+            encode=lambda text, **kwargs: [ord(text) - ord("A")]
+        )
+        with (
+            patch.object(
+                Qwen3_5ForConditionalGeneration,
+                "__init__",
+                lambda self, **kwargs: torch.nn.Module.__init__(self),
+            ),
+            patch.object(
+                Qwen3_5ForConditionalGeneration,
+                "load_weights",
+                lambda self, weights: {name for name, _ in weights},
+            ),
+            patch(
+                "vllm.model_executor.models.startlux_decision."
+                "cached_tokenizer_from_config",
+                return_value=tokenizer,
+            ),
+        ):
+            model = StartLuxDecisionForSequenceClassification(vllm_config=config)
+            weight = torch.arange(128).reshape(32, 4).to(torch.bfloat16)
+            for tied, name in [
+                (True, "model.language_model.embed_tokens.weight"),
+                (False, "lm_head.weight"),
+            ]:
+                model.config = SimpleNamespace(
+                    get_text_config=lambda tied=tied: SimpleNamespace(
+                        tie_word_embeddings=tied
+                    )
+                )
+                self.assertEqual(model.load_weights(iter([(name, weight)])), {name})
+                torch.testing.assert_close(
+                    model.pooler.letter_weight, weight[:26].float()
+                )
+            config.parallel_config.pipeline_parallel_size = 2
+            with self.assertRaisesRegex(ValueError, "PP=1"):
+                StartLuxDecisionForSequenceClassification(vllm_config=config)
+
     def test_last_positions_keep_raw_candidate_logits(self):
         # Nonconsecutive vocabulary rows catch TP-local/vocabulary index confusion.
         pooler = StartLuxDecisionPooler([1, 6, 3], 4)
@@ -68,7 +117,9 @@ class TestStartLuxDecisionPooler(unittest.TestCase):
             def __init__(self, tied):
                 torch.nn.Module.__init__(self)
                 self.config = SimpleNamespace(
-                    get_text_config=lambda: SimpleNamespace(tie_word_embeddings=tied)
+                    get_text_config=lambda tied=tied: SimpleNamespace(
+                        tie_word_embeddings=tied
+                    )
                 )
                 self.pooler = StartLuxDecisionPooler([1, 3], 2)
 

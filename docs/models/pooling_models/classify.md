@@ -33,6 +33,7 @@ The most fundamental application of classification models is to categorize input
 | ------------ | ------ | ----------------- | ------------------------------ | ------------------------------------------ |
 | `GPT2ForSequenceClassification` | GPT2 | `nie3e/sentiment-polish-gpt2-small` | | |
 | `Qwen2ForSequenceClassification`<sup>C</sup> | Qwen2-based | `jason9693/Qwen2.5-1.5B-apeach` | | |
+| `StartLuxDecisionForSequenceClassification` | StartLux-Decision | `startlux-models/StartLux-Decision-4B` | | |
 | `StartLuxDecisionMoeForSequenceClassification` | StartLux-Decision | `startlux-models/StartLux-Decision-35B-A3B` | | |
 | `*Model`<sup>C</sup>, `*ForCausalLM`<sup>C</sup>, etc. | Generative models | N/A | \* | \* |
 

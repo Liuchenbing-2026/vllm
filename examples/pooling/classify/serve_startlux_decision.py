@@ -39,9 +39,11 @@ class VLLMStartLuxDecision(StartLuxDecision):
         self._kept = self._media = None
         hf_config = AutoConfig.from_pretrained(checkpoint)
         moe = getattr(hf_config.get_text_config(), "num_experts", 0)
-        if not moe:
-            raise ValueError("This example requires a StartLux MoE checkpoint")
-        architecture = "StartLuxDecisionMoeForSequenceClassification"
+        architecture = (
+            "StartLuxDecisionMoeForSequenceClassification"
+            if moe
+            else "StartLuxDecisionForSequenceClassification"
+        )
         self.llm = LLM(
             model=checkpoint,
             runner="pooling",

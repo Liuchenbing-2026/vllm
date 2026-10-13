@@ -17,8 +17,10 @@ from vllm.v1.pool.metadata import PoolingMetadata
 
 from .interfaces_base import default_pooling_type
 from .qwen3_5 import (
+    Qwen3_5ForConditionalGeneration,
     Qwen3_5MoeForConditionalGeneration,
     Qwen3_5MoeProcessingInfo,
+    Qwen3_5ProcessingInfo,
 )
 from .qwen3_vl import Qwen3VLDummyInputsBuilder, Qwen3VLMultiModalProcessor
 
@@ -59,11 +61,11 @@ class StartLuxDecisionPooler(Pooler):
 @default_pooling_type(seq_pooling_type="LAST")
 @MULTIMODAL_REGISTRY.register_processor(
     Qwen3VLMultiModalProcessor,
-    info=Qwen3_5MoeProcessingInfo,
+    info=Qwen3_5ProcessingInfo,
     dummy_inputs=Qwen3VLDummyInputsBuilder,
 )
-class StartLuxDecisionMoeForSequenceClassification(Qwen3_5MoeForConditionalGeneration):
-    """Qwen3.5 MoE StartLux checkpoints."""
+class StartLuxDecisionForSequenceClassification(Qwen3_5ForConditionalGeneration):
+    """Dense Qwen3.5 StartLux checkpoints."""
 
     is_pooling_model = True
 
@@ -101,3 +103,15 @@ class StartLuxDecisionMoeForSequenceClassification(Qwen3_5MoeForConditionalGener
         if not head_loaded:
             raise ValueError("Checkpoint contains no StartLux output head")
         return loaded
+
+
+@default_pooling_type(seq_pooling_type="LAST")
+@MULTIMODAL_REGISTRY.register_processor(
+    Qwen3VLMultiModalProcessor,
+    info=Qwen3_5MoeProcessingInfo,
+    dummy_inputs=Qwen3VLDummyInputsBuilder,
+)
+class StartLuxDecisionMoeForSequenceClassification(
+    StartLuxDecisionForSequenceClassification, Qwen3_5MoeForConditionalGeneration
+):
+    """Qwen3.5 MoE StartLux checkpoints."""
