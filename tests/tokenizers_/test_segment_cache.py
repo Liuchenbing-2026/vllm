@@ -259,6 +259,42 @@ def test_chat_cache_matches_regular_template_for_each_request(
     assert cache.hits > 0
 
 
+def test_custom_encoding_override_preserves_full_call(tokenizer):
+    from types import SimpleNamespace
+
+    from vllm.renderers.hf import HfRenderer
+    from vllm.renderers.params import TokenizeParams
+
+    class CustomTokenizer(TokenizersBackend):
+        def _encode_plus(self, text, *args, **kwargs):
+            output = super()._encode_plus(text, *args, **kwargs)
+            if text.startswith("custom-prefix"):
+                output["input_ids"].append(self.convert_tokens_to_ids("<|start|>"))
+            return output
+
+    custom = CustomTokenizer(tokenizer_object=tokenizer.backend_tokenizer)
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(),
+            renderer_num_workers=2,
+            tokenizer_cache_gb=0.001,
+            enable_prompt_embeds=False,
+            is_multimodal_model=False,
+        ),
+        parallel_config=SimpleNamespace(_api_process_rank=0),
+    )
+    renderer = HfRenderer(config, custom)
+    try:
+        text = "custom-prefix<|end|>tail"
+        params = TokenizeParams(max_total_tokens=1000, add_special_tokens=False)
+        expected = custom(text, **params.get_encode_kwargs())["input_ids"]
+        actual = renderer._tokenize_prompt({"prompt": text}, params)
+        assert actual["prompt_token_ids"] == expected
+        assert renderer._tokenizer_cache is None
+    finally:
+        renderer.shutdown()
+
+
 def test_cache_context_does_not_consume_template_variables(tokenizer):
     from types import SimpleNamespace
 

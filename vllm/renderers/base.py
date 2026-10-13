@@ -95,11 +95,22 @@ class BaseRenderer(ABC, Generic[_T]):
         ):
             from transformers import TokenizersBackend
 
-            if (
-                isinstance(tokenizer, TokenizersBackend)
-                and type(tokenizer).__call__ is TokenizersBackend.__call__
-                and type(tokenizer).apply_chat_template
-                is TokenizersBackend.apply_chat_template
+            if isinstance(tokenizer, TokenizersBackend) and all(
+                getattr(type(tokenizer), method, None)
+                is getattr(TokenizersBackend, method, None)
+                for method in (
+                    "__call__",
+                    "_call_one",
+                    "encode",
+                    "encode_plus",
+                    "batch_encode_plus",
+                    "_encode_plus",
+                    "_batch_encode_plus",
+                    "_convert_encoding",
+                    "_get_padding_truncation_strategies",
+                    "set_truncation_and_padding",
+                    "apply_chat_template",
+                )
             ):
                 self._tokenizer_cache = SegmentTokenizerCache(tokenizer, capacity_gb)
             if self._tokenizer_cache and not self._tokenizer_cache.enabled:
