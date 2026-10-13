@@ -88,7 +88,10 @@ async def run_launch_fastapi(args: argparse.Namespace) -> None:
     # cache space warning from CpuPlatform.check_and_update_config.
     envs.VLLM_CPU_KVCACHE_SPACE = 0
 
-    vllm_config = VllmConfig(model_config=model_config)
+    vllm_config = VllmConfig(
+        model_config=model_config,
+        additional_config=engine_args.additional_config,
+    )
     shutdown_task = await build_and_serve_renderer(
         vllm_config, listen_address, sock, args
     )

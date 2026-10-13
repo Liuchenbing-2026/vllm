@@ -69,6 +69,7 @@ if TYPE_CHECKING:
         MultiModalPromptUpdates,
         ResolvedPromptUpdate,
     )
+    from vllm.tokenizers.segment_cache import SegmentTokenizerCache
 
     from .inputs import DictPrompt
     from .params import ChatParams
@@ -795,6 +796,32 @@ def safe_apply_chat_template(
     return_assistant_tokens_mask: bool = False,
     **kwargs,
 ) -> str | list[int] | tuple[list[int], list[int] | None]:
+    return _apply_chat_template_with_cache(
+        None,
+        model_config,
+        tokenizer,
+        conversation,
+        tools=tools,
+        chat_template=chat_template,
+        tokenize=tokenize,
+        return_assistant_tokens_mask=return_assistant_tokens_mask,
+        **kwargs,
+    )
+
+
+def _apply_chat_template_with_cache(
+    tokenizer_cache: SegmentTokenizerCache | None,
+    /,
+    model_config: ModelConfig,
+    tokenizer: HfTokenizer,
+    conversation: list[ConversationMessage],
+    *,
+    tools: list[dict[str, Any]] | None = None,
+    chat_template: str | None = None,
+    tokenize: bool = True,
+    return_assistant_tokens_mask: bool = False,
+    **kwargs,
+) -> str | list[int] | tuple[list[int], list[int] | None]:
     chat_template = resolve_chat_template(
         tokenizer,
         chat_template=chat_template,
@@ -863,6 +890,32 @@ def safe_apply_chat_template(
         resolved_kwargs["return_dict"] = False
 
     try:
+        if (
+            tokenizer_cache is not None
+            and tokenizer_cache.enabled
+            and tokenize
+            and not return_assistant_tokens_mask
+            and not any(
+                resolved_kwargs.get(key)
+                for key in (
+                    "return_dict",
+                    "return_tensors",
+                    "padding",
+                    "truncation",
+                    "tokenizer_kwargs",
+                )
+            )
+        ):
+            text = tokenizer.apply_chat_template(
+                conversation=conversation,
+                tools=tools,
+                chat_template=chat_template,
+                tokenize=False,
+                **resolved_kwargs,
+            )
+            ids = tokenizer_cache.encode(text, add_special_tokens=False)
+            if ids is not None:
+                return ids
         plain = tokenizer.apply_chat_template(
             conversation=conversation,  # type: ignore[arg-type]
             tools=tools,  # type: ignore[arg-type]
@@ -1004,7 +1057,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         )
 
         self._apply_chat_template_async = make_async(
-            safe_apply_chat_template, executor=self._executor
+            _apply_chat_template_with_cache, executor=self._executor
         )
 
         if self.tokenizer is not None:
@@ -1065,6 +1118,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
             chat_template_kwargs["tokenize"] = True
 
         assistant_tokens_mask: list[int] | None = None
+        prompt_raw: str | list[int]
         if params.return_assistant_tokens_mask:
             prompt_raw, assistant_tokens_mask = safe_apply_chat_template(
                 model_config,
@@ -1074,11 +1128,15 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
                 **chat_template_kwargs,
             )
         else:
-            prompt_raw = safe_apply_chat_template(
-                model_config,
-                tokenizer,
-                conversation,
-                **chat_template_kwargs,
+            prompt_raw = cast(
+                str | list[int],
+                _apply_chat_template_with_cache(
+                    self._tokenizer_cache,
+                    model_config,
+                    tokenizer,
+                    conversation,
+                    **chat_template_kwargs,
+                ),
             )
 
         # NOTE: use_unified_vision_chunk is currently specific to Kimi-K2.5
@@ -1199,11 +1257,15 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
             prompt_raw: str | list[int] = result_with_mask[0]
             assistant_tokens_mask = result_with_mask[1]
         else:
-            prompt_raw = await self._apply_chat_template_async(
-                model_config,
-                tokenizer,
-                conversation,
-                **chat_template_kwargs,
+            prompt_raw = cast(
+                str | list[int],
+                await self._apply_chat_template_async(
+                    self._tokenizer_cache,
+                    model_config,
+                    tokenizer,
+                    conversation,
+                    **chat_template_kwargs,
+                ),
             )
 
         # NOTE: use_unified_vision_chunk is currently specific to Kimi-K2.5
