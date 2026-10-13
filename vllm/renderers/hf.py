@@ -1004,7 +1004,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         )
 
         self._apply_chat_template_async = make_async(
-            safe_apply_chat_template, executor=self._executor
+            self._apply_chat_template, executor=self._executor
         )
 
         if self.tokenizer is not None:
@@ -1016,6 +1016,34 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         # HF tokenizers may be slow (use_fast=False); only fast tokenizers
         # expose offset_mapping.
         return self.tokenizer is not None and self.tokenizer.is_fast
+
+    def _apply_chat_template(
+        self,
+        conversation: list[ConversationMessage],
+        **kwargs: Any,
+    ) -> str | list[int] | tuple[list[int], list[int] | None]:
+        """``safe_apply_chat_template`` with the incremental cache in front."""
+        cache = self._tokenizer_cache
+        if cache is not None and not kwargs.get("return_assistant_tokens_mask"):
+
+            def render(**render_kwargs: Any) -> Any:
+                # ``kwargs`` carries the chat template and its kwargs (the
+                # OpenAI renderer delivers ``tools`` through
+                # ``chat_template_kwargs``), so they have to survive the probe;
+                # only ``tokenize`` may be overridden.
+                return safe_apply_chat_template(
+                    self.model_config,
+                    self.get_tokenizer(),
+                    conversation,
+                    **{**kwargs, **render_kwargs},
+                )
+
+            token_ids = self._cached_chat_token_ids(render, kwargs)
+            if token_ids is not None:
+                return token_ids
+        return safe_apply_chat_template(
+            self.model_config, self.get_tokenizer(), conversation, **kwargs
+        )
 
     def render_messages(
         self,
@@ -1066,17 +1094,13 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
 
         assistant_tokens_mask: list[int] | None = None
         if params.return_assistant_tokens_mask:
-            prompt_raw, assistant_tokens_mask = safe_apply_chat_template(
-                model_config,
-                tokenizer,
+            prompt_raw, assistant_tokens_mask = self._apply_chat_template(
                 conversation,
                 return_assistant_tokens_mask=True,
                 **chat_template_kwargs,
             )
         else:
-            prompt_raw = safe_apply_chat_template(
-                model_config,
-                tokenizer,
+            prompt_raw = self._apply_chat_template(
                 conversation,
                 **chat_template_kwargs,
             )
@@ -1185,12 +1209,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         if params.return_assistant_tokens_mask:
             result_with_mask = cast(
                 tuple[list[int], list[int] | None],
-                await make_async(
-                    safe_apply_chat_template,
-                    executor=self._executor,
-                )(
-                    model_config,
-                    tokenizer,
+                await self._apply_chat_template_async(
                     conversation,
                     return_assistant_tokens_mask=True,  # type: ignore[arg-type]
                     **chat_template_kwargs,
@@ -1200,8 +1219,6 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
             assistant_tokens_mask = result_with_mask[1]
         else:
             prompt_raw = await self._apply_chat_template_async(
-                model_config,
-                tokenizer,
                 conversation,
                 **chat_template_kwargs,
             )

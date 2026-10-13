@@ -382,6 +382,14 @@ class ModelConfig:
     The offline `LLM` entrypoint uses the synchronous renderer path and
     processes prompts (including multimodal preprocessing) serially, so
     this setting has no effect there."""
+    tokenizer_cache_gb: int = 0
+    """Size of the renderer's incremental (segment-level) tokenizer cache, in
+    GiB, per API server process. `0` (the default) disables it.
+
+    It only pays off at very high prefix-cache hit rates, where tokenization -
+    still `O(full prompt)` on every turn - dominates the frontend cost. The
+    cache lives in host memory and never consumes device memory; with
+    `--api-server-count N` the footprint is `N` times this value."""
 
     # Pooler config
     pooler_config: PoolerConfig | None = None
@@ -861,6 +869,11 @@ class ModelConfig:
             # Set after get_and_verify_max_len to ensure that max_model_len
             # can be correctly capped to sliding window size
             self.hf_text_config.sliding_window = None
+
+        if self.tokenizer_cache_gb < 0:
+            raise ValueError(
+                f"--tokenizer-cache-gb must be >= 0; got {self.tokenizer_cache_gb}."
+            )
 
         # Avoid running try_verify_and_update_config multiple times
         self.config_updated = False

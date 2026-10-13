@@ -4,7 +4,7 @@ import asyncio
 import time
 import weakref
 from abc import ABC, abstractmethod
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import ExitStack
 from functools import cached_property
@@ -57,6 +57,11 @@ from .inputs import (
 )
 from .inputs.preprocess import extract_target_prompt
 from .params import ChatParams, TokenizeParams
+from .tokenizer_cache import (
+    IncrementalTokenizerCache,
+    build_tokenizer_cache,
+    cached_chat_token_ids,
+)
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -111,6 +116,14 @@ class BaseRenderer(ABC, Generic[_T]):
         pool_workers = config.model_config.renderer_num_workers
         self._executor = ThreadPoolExecutor(max_workers=pool_workers)
         self._resources.callback(self._executor.shutdown, wait=False)
+
+        # Optional segment-level tokenizer cache (see ``--tokenizer-cache-gb``).
+        # Built once per renderer, i.e. once per API server process; ``None``
+        # unless the operator opted in, in which case every entry point below
+        # keeps its original behavior.
+        self._tokenizer_cache: IncrementalTokenizerCache | None = build_tokenizer_cache(
+            config, tokenizer
+        )
 
         # Separate single-worker executor so tokenization never queues behind
         # MM preprocessing; must stay single-worker per #38418 (P0/P1 order).
@@ -558,6 +571,18 @@ class BaseRenderer(ABC, Generic[_T]):
             )
         return TokensPrompt(prompt_token_ids=list(token_ids), **prompt)
 
+    def _cached_chat_token_ids(
+        self,
+        render: Callable[..., Any],
+        chat_kwargs: dict[str, Any],
+    ) -> list[int] | None:
+        """Token ids from the incremental cache, or ``None`` to fall through.
+
+        ``render`` must re-enter this renderer's chat entry point with
+        ``tokenize`` forced, so that the cache can probe the template once.
+        """
+        return cached_chat_token_ids(self._tokenizer_cache, render, chat_kwargs)
+
     @staticmethod
     def _apply_prompt_char_offset(
         prompt: TokensPrompt, char_offset: int
@@ -587,6 +612,26 @@ class BaseRenderer(ABC, Generic[_T]):
         tokenizer = self.get_tokenizer()
         want_offsets = self._wants_offsets(prompt, params)
         kwargs = params.get_encode_kwargs()
+
+        cache = self._tokenizer_cache
+        if (
+            cache is not None
+            and not want_offsets
+            and cache.is_eligible(
+                add_special_tokens=kwargs.get("add_special_tokens", True)
+            )
+        ):
+            token_ids = cache.encode(prompt["prompt"])
+            max_length = kwargs.get("max_length")
+            if not (
+                kwargs.get("truncation")
+                and max_length is not None
+                and len(token_ids) > max_length
+            ):
+                return self._build_tokens_prompt(token_ids, prompt)
+            # Truncation is side-dependent, and rare on a cache hit; let the
+            # original path re-tokenize and slice.
+
         if want_offsets:
             kwargs = {**kwargs, "return_offsets_mapping": True}
         encoding = tokenizer(prompt["prompt"], **kwargs)
