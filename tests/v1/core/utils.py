@@ -368,6 +368,7 @@ def new_sliding_window_spec(
     dtype=torch.float32,
     page_size_padded=None,
     sliding_window=1,
+    is_draft_layer=False,
 ):
     return SlidingWindowSpec(
         block_size=block_size,
@@ -376,6 +377,7 @@ def new_sliding_window_spec(
         dtype=dtype,
         page_size_padded=page_size_padded,
         sliding_window=sliding_window,
+        is_draft_layer=is_draft_layer,
     )
 
 

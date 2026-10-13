@@ -256,6 +256,7 @@ class Attention(nn.Module, AttentionLayerBase):
         mm_prefix_clamp_sliding_window: bool = False,
         attn_backend: type[AttentionBackend] | None = None,
         head_size_v: int | None = None,
+        is_draft_layer: bool = False,
         **extra_impl_args,
     ) -> None:
         """The KV cache is stored inside this class and is accessed via
@@ -360,6 +361,11 @@ class Attention(nn.Module, AttentionLayerBase):
             )
         else:
             self.attn_backend = attn_backend
+        # A speculative drafter whose attention is indistinguishable from the
+        # target's (e.g. DFlash/DFlash2 GQA sliding-window layers) advertises
+        # itself here so the KV-cache planner can flag its group for
+        # block-drop. See ``FullAttentionSpec.is_draft_layer``.
+        self.is_draft_layer = is_draft_layer
         backend_supports_alibi_sqrt = self.attn_backend.supports_alibi_sqrt()
         use_alibi_sqrt = use_alibi_sqrt if use_alibi_sqrt else False
         if use_alibi_sqrt and not backend_supports_alibi_sqrt:
@@ -665,6 +671,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 kv_quant_mode=quant_mode,
                 sliding_window=self.sliding_window,
                 page_size_padded=shared_page,
+                is_draft_layer=self.is_draft_layer,
             )
         else:
             return FullAttentionSpec(
@@ -674,6 +681,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 head_size_v=self.head_size_v,
                 dtype=self.kv_cache_torch_dtype,
                 kv_quant_mode=quant_mode,
+                is_draft_layer=self.is_draft_layer,
             )
 
 

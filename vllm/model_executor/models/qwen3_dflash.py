@@ -268,6 +268,11 @@ class DFlashQwen3Attention(nn.Module):
             prefix=f"{prefix}.attn",
             attn_type=attn_type,
             sinks=self.attention_sink_bias,
+            # The DFlash drafter's GQA layers can be shape-identical to the
+            # target's (e.g. a sliding-window drafter on a hybrid MLA target),
+            # so mark them as draft layers. Without this, the KV-cache planner
+            # cannot find the draft group and silently disables block-drop.
+            is_draft_layer=True,
         )
         self.causal = causal
         if current_platform.is_rocm():

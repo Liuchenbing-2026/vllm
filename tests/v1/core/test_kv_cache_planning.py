@@ -2164,6 +2164,95 @@ def test_non_mtp_eagle_hybrid_still_warns(caplog_vllm, method):
     assert "could be identified as the draft model's" in caplog_vllm.text
 
 
+def _dflash_swa_hybrid_specs(with_draft: bool = True, with_hidden: bool = False):
+    """GLM-5.3-Flash-shaped hybrid with a DFlash2 sliding-window drafter.
+
+    The target interleaves MLA full-attention layers with linear (Mamba)
+    layers; the drafter contributes plain GQA ``SlidingWindowSpec`` layers,
+    which must self-identify through ``is_draft_layer``. ``with_hidden`` adds
+    an aux EAGLE3 hidden-state cache that registers after the draft layers,
+    exactly as in the GLM-5.3-Flash checkpoint that reported vllm#61443 -- so
+    a positional (trailing-layer) rule would pick the wrong group here.
+    """
+    specs = {
+        "model.layers.0.self_attn.attn": new_mla_spec(block_size=128),
+        "model.layers.1.linear_attn": new_mamba_spec(
+            block_size=128, mamba_cache_mode="align"
+        ),
+        "model.layers.2.self_attn.attn": new_mla_spec(block_size=128),
+        "model.layers.3.linear_attn": new_mamba_spec(
+            block_size=128, mamba_cache_mode="align"
+        ),
+    }
+    if with_draft:
+        for i in range(2):
+            specs[f"draft.layers.{i}.self_attn.attn"] = new_sliding_window_spec(
+                block_size=128,
+                num_kv_heads=2,
+                head_size=64,
+                sliding_window=2048,
+                is_draft_layer=True,
+            )
+    if with_hidden:
+        specs["model.layers.4.hidden"] = HiddenStateCacheSpec(
+            block_size=128, num_kv_heads=2, head_size=64, dtype=torch.float32
+        )
+    return specs
+
+
+@pytest.mark.parametrize("with_hidden", [False, True])
+def test_dflash_swa_draft_group_annotated(caplog_vllm, with_hidden):
+    # A DFlash drafter with plain sliding-window layers carries no MLA marker
+    # and is not an MTP block, so only the spec-level draft marker can find its
+    # group. Regression test for vllm#61443: this must hold with and without the
+    # aux hidden-state cache that registers after the draft layers.
+    groups = get_kv_cache_groups(
+        _spec_decode_grouping_config(method="dflash", model_type="glm5_next"),
+        _dflash_swa_hybrid_specs(with_draft=True, with_hidden=with_hidden),
+    )
+
+    flagged = [g for g in groups if g.is_eagle_group]
+    assert len(flagged) == 1
+    assert sorted(flagged[0].layer_names) == [
+        "draft.layers.0.self_attn.attn",
+        "draft.layers.1.self_attn.attn",
+    ]
+    for group in groups:
+        specs = list(iter_layer_specs(group.kv_cache_spec))
+        if any(isinstance(spec, MambaSpec) for spec in specs):
+            assert not group.is_eagle_group
+        if any(isinstance(spec, HiddenStateCacheSpec) for spec in specs):
+            assert not group.is_eagle_group
+    assert "could be identified as the draft model's" not in caplog_vllm.text
+
+
+def test_swa_group_without_draft_marker_still_warns(caplog_vllm):
+    # The marker is what flags the group: an otherwise identical sliding-window
+    # group that no drafter claims must not be flagged, and the unannotated
+    # hybrid must keep warning.
+    specs = _dflash_swa_hybrid_specs(with_draft=False)
+    specs["draft.layers.0.self_attn.attn"] = new_sliding_window_spec(
+        block_size=128, num_kv_heads=2, head_size=64, sliding_window=2048
+    )
+
+    groups = get_kv_cache_groups(
+        _spec_decode_grouping_config(method="dflash", model_type="glm5_next"), specs
+    )
+
+    assert not any(g.is_eagle_group for g in groups)
+    assert "could be identified as the draft model's" in caplog_vllm.text
+
+
+def test_dflash_draft_marker_ignored_without_spec_decode():
+    # The marker alone must not flag anything; the eagle semantics only apply
+    # when a speculative method is enabled.
+    config = _spec_decode_grouping_config()
+    config.speculative_config = None
+    groups = get_kv_cache_groups(config, _dflash_swa_hybrid_specs(with_draft=True))
+
+    assert not any(g.is_eagle_group for g in groups)
+
+
 def test_trailing_layer_fallback_requires_exact_partition():
     # If the groups do not partition the layers exactly (e.g. a caller that
     # dropped or duplicated layers), the positional rule is meaningless and

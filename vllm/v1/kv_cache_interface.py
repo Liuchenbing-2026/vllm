@@ -530,6 +530,20 @@ class AttentionSpec(KVCacheSpec):
     into one state (DSv4 sparse MLA); fractions < 1 store multiple states per
     token (Whisper block pooling: ``Fraction(1, block_pool_size)``)."""
 
+    is_draft_layer: bool = False
+    """
+    Whether this attention layer belongs to the speculative drafter (the draft
+    model) rather than the target model. A drafter whose attention shape is
+    indistinguishable from the target's -- e.g. a DFlash/DFlash2 drafter whose
+    layers are plain GQA ``SlidingWindowSpec`` -- cannot be located by shape,
+    model type or registration order alone, so it self-identifies here and
+    ``_annotate_eagle_groups`` uses the marker to flag its KV cache group for
+    block-drop. It is not a cache-layout property: consumers that merge specs
+    propagate it with ``any()`` so that a group holding at least one draft
+    layer is flagged. Never set on ``MambaSpec``: a Mamba group must not be
+    flagged.
+    """
+
     def __post_init__(self):
         super().__post_init__()
         if self.head_size_v is None:
@@ -657,6 +671,10 @@ class FullAttentionSpec(AttentionSpec):
             # If any layer in the group is non-causal, treat the group as
             # non-causal so the engine core disables incompatible scheduling.
             non_causal=any(spec.non_causal for spec in specs),
+            # Same for the draft marker: a group holding at least one drafter
+            # layer has to be flagged even when the drafter shares the spec
+            # with the target layers in it.
+            is_draft_layer=any(spec.is_draft_layer for spec in specs),
         )
         for spec in specs:
             for f in fields(AttentionSpec):
@@ -744,6 +762,9 @@ class MLAAttentionSpec(FullAttentionSpec):
             non_causal_multi_token_decode=any(
                 spec.non_causal_multi_token_decode for spec in specs
             ),
+            # Carry the drafter marker through merge so a draft MLA group stays
+            # identifiable after per-group spec merging.
+            is_draft_layer=any(spec.is_draft_layer for spec in specs),
         )
         for spec in specs:
             for f in fields(AttentionSpec):
@@ -802,6 +823,7 @@ class RSWASpec(FullAttentionSpec):
             sliding_window=base.sliding_window,
             attention_chunk_size=base.attention_chunk_size,
             non_causal=base.non_causal,
+            is_draft_layer=base.is_draft_layer,
             rswa_window=rswa_windows.pop(),
         )
 
@@ -1018,6 +1040,7 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
             tokens_per_state=tokens_per_state_set.pop(),
             model_version=model_version_set.pop(),
             bounded_replay=bounded_replay_set.pop(),
+            is_draft_layer=any(spec.is_draft_layer for spec in specs),
         )
 
     def is_uniform_with_collection(

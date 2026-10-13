@@ -1047,13 +1047,16 @@ def _annotate_eagle_groups(
 
     Two detection rules, in order of preference:
 
-    1. Spec-driven. ``non_causal_multi_token_decode`` is declared on
-       MLAAttentionSpec and set by drafter attention layers that run a
-       non-causal multi-token decode (today only Kimi-K3 DSpark). It survives
-       MLAAttentionSpec.merge, so it still identifies a group after per-group
-       spec merging, wherever grouping happens to land. It is sufficient but
-       not necessary: a drafter whose spec is indistinguishable from the
-       target's cannot be found this way.
+    1. Spec-driven. A drafter attention layer marks its own spec, and the
+       marker survives merge, so it still identifies a group after per-group
+       spec merging, wherever grouping happens to land. Two markers count:
+       * ``is_draft_layer`` -- set by a drafter that knows its attention is
+         shape-identical to the target's (e.g. DFlash/DFlash2 sliding window).
+       * ``non_causal_multi_token_decode`` -- declared on MLAAttentionSpec and
+         set by drafter attention layers that run a non-causal multi-token
+         decode (today only Kimi-K3 DSpark).
+       Neither is necessary: a drafter whose spec carries no marker (an MTP
+       block reusing the target's own decoder layer) is found by rule 2.
     2. Positional fallback for MTP drafters (including DeepseekV4/V4.1 DSpark), whose
        MTP block reuses the target's own decoder layer and so carries no spec
        marker. Their draft attention layers always register after every
@@ -1079,7 +1082,8 @@ def _annotate_eagle_groups(
 
     for group in kv_cache_groups:
         if any(
-            getattr(spec, "non_causal_multi_token_decode", False)
+            getattr(spec, "is_draft_layer", False)
+            or getattr(spec, "non_causal_multi_token_decode", False)
             for spec in iter_layer_specs(group.kv_cache_spec)
         ):
             group.is_eagle_group = True
