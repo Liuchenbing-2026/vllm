@@ -340,6 +340,10 @@ _SEQUENCE_CLASSIFICATION_MODELS = {
         "nemotron_vl",
         "LlamaNemotronVLForSequenceClassification",
     ),
+    "D3ForSequenceClassification": (
+        "d3",
+        "D3ForSequenceClassification",
+    ),
 }
 
 _MULTIMODAL_MODELS = {
