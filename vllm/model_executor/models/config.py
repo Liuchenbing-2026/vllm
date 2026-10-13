@@ -916,6 +916,25 @@ class Qwen4ExpMTPConfig(Qwen4ExpForConditionalGenerationConfig):
         _strip_qwen4_exp_mrope(vllm_config.model_config)
 
 
+class D3Config(Qwen3_5ForConditionalGenerationConfig):
+    """Preserve the attention and pooling semantics of a decision checkpoint."""
+
+    @staticmethod
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        config = model_config.hf_config
+        attention_mode = getattr(config, "decision_attention_mode", None)
+        if attention_mode != "noncausal_full_attention":
+            raise ValueError("D3 requires noncausal_full_attention")
+        if getattr(config, "decision_pooling", None) != "last":
+            raise ValueError("D3 requires last-token pooling")
+        if getattr(config, "num_labels", 0) <= 0:
+            raise ValueError("D3 requires a positive number of decision labels")
+        if getattr(config, "decision_readout_dtype", None) != "float32":
+            raise ValueError("D3 requires a float32 readout")
+        config.is_causal = False
+        model_config.hf_text_config.is_causal = False
+
+
 class ColQwen3_5Config(Qwen3_5ForConditionalGenerationConfig):
     """Apply the attention contract declared by a ColQwen3.5 checkpoint."""
 
@@ -1021,6 +1040,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "JambaForSequenceClassification": JambaForSequenceClassificationConfig,
     "JinaEmbeddingsV5Model": JinaEmbeddingsV5ModelConfig,
     "JinaForRanking": JinaForRankingConfig,
+    "D3ForSequenceClassification": D3Config,
     "JinaVLForRanking": JinaVLForSequenceClassificationConfig,
     "KimiK3ForConditionalGeneration": KimiK3ForConditionalGenerationConfig,
     "KimiK3MTPModel": KimiK3ForConditionalGenerationConfig,
