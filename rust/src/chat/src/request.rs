@@ -218,7 +218,12 @@ pub enum ChatMessage {
     /// Message content under a role outside the standard set, passed to chat
     /// templates unchanged.
     #[serde(untagged)]
-    Custom { role: String, content: ChatContent },
+    Custom {
+        role: String,
+        content: ChatContent,
+        #[serde(default, flatten)]
+        extra_fields: serde_json::Map<String, Value>,
+    },
 }
 
 impl ChatMessage {
@@ -299,7 +304,26 @@ impl ChatMessage {
         Self::Custom {
             role: role.into(),
             content: content.into(),
+            extra_fields: serde_json::Map::new(),
         }
+    }
+
+    /// Construct a custom message retaining model-specific template fields.
+    pub fn custom_with_extra_fields(
+        role: impl Into<String>,
+        content: impl Into<ChatContent>,
+        extra_fields: serde_json::Map<String, Value>,
+    ) -> Result<Self> {
+        if extra_fields.contains_key("role") || extra_fields.contains_key("content") {
+            return Err(Error::ChatTemplate(
+                "custom message fields cannot override role or content".to_string(),
+            ));
+        }
+        Ok(Self::Custom {
+            role: role.into(),
+            content: content.into(),
+            extra_fields,
+        })
     }
 
     /// Return the chat role of this message.
@@ -762,6 +786,31 @@ mod tests {
             ChatContent::from("hello".to_string()),
             ChatContent::Text("hello".to_string())
         );
+    }
+
+    #[test]
+    fn custom_message_extension_fields_survive_json_roundtrip() {
+        let value = json!({
+            "role": "checkpoint",
+            "content": "payload",
+            "trace_key": "blue",
+            "metadata": {"step": 3},
+            "labels": ["first", "second"],
+            "optional": null
+        });
+        let message: ChatMessage = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(message).unwrap(), value);
+    }
+
+    #[test]
+    fn custom_message_extra_fields_cannot_replace_role_or_content() {
+        for field in ["role", "content"] {
+            let extra_fields = [(field.to_string(), json!("changed"))].into_iter().collect();
+            assert!(
+                ChatMessage::custom_with_extra_fields("checkpoint", "payload", extra_fields)
+                    .is_err()
+            );
+        }
     }
 
     #[test]

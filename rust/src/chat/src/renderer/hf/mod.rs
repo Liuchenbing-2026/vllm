@@ -278,6 +278,8 @@ struct TemplateMessage<'a> {
     tool_calls: Option<Vec<TemplateToolCall>>,
     // Tool-role messages refer back to the assistant call they are answering.
     tool_call_id: Option<String>,
+    #[serde(flatten)]
+    extra_fields: Option<&'a serde_json::Map<String, serde_json::Value>>,
 }
 
 /// Chat content in the two shapes HF templates commonly expect.
@@ -345,6 +347,13 @@ fn to_template_message<'a>(
     content_format: ChatTemplateContentFormat,
     multimodal: Option<&MultimodalRenderInfo>,
 ) -> Result<TemplateMessage<'a>> {
+    if let ChatMessage::Custom { extra_fields, .. } = message
+        && (extra_fields.contains_key("role") || extra_fields.contains_key("content"))
+    {
+        return Err(Error::ChatTemplate(
+            "custom message fields cannot override role or content".to_string(),
+        ));
+    }
     Ok(match message {
         ChatMessage::System { content } => TemplateMessage {
             role: "system",
@@ -354,6 +363,7 @@ fn to_template_message<'a>(
             reasoning_content: None,
             tool_calls: None,
             tool_call_id: None,
+            extra_fields: None,
         },
         ChatMessage::Developer { content, tools } => TemplateMessage {
             role: "developer",
@@ -363,6 +373,7 @@ fn to_template_message<'a>(
             reasoning_content: None,
             tool_calls: None,
             tool_call_id: None,
+            extra_fields: None,
         },
         ChatMessage::User { content } => TemplateMessage {
             role: "user",
@@ -372,6 +383,7 @@ fn to_template_message<'a>(
             reasoning_content: None,
             tool_calls: None,
             tool_call_id: None,
+            extra_fields: None,
         },
         ChatMessage::Assistant { content } => {
             let text = content.text();
@@ -387,6 +399,7 @@ fn to_template_message<'a>(
                 reasoning_content: reasoning,
                 tool_calls,
                 tool_call_id: None,
+                extra_fields: None,
             }
         }
         ChatMessage::ToolResponse {
@@ -400,8 +413,13 @@ fn to_template_message<'a>(
             reasoning_content: None,
             tool_calls: None,
             tool_call_id: Some(tool_call_id.clone()),
+            extra_fields: None,
         },
-        ChatMessage::Custom { role, content } => TemplateMessage {
+        ChatMessage::Custom {
+            role,
+            content,
+            extra_fields,
+        } => TemplateMessage {
             role,
             content: to_template_content(content, content_format, multimodal)?,
             tools: None,
@@ -409,6 +427,7 @@ fn to_template_message<'a>(
             reasoning_content: None,
             tool_calls: None,
             tool_call_id: None,
+            extra_fields: Some(extra_fields),
         },
     })
 }
@@ -1052,6 +1071,25 @@ mod tests {
         .unwrap();
 
         assert_eq!(rendered, "root=identity;system=policy;user=hello;");
+    }
+
+    #[test]
+    fn chat_template_preserves_custom_message_extension_fields() {
+        let message = serde_json::from_value(serde_json::json!({
+            "role": "checkpoint",
+            "content": "payload",
+            "trace_key": "blue",
+            "metadata": {"step": 3},
+            "labels": ["first", "second"]
+        }))
+        .unwrap();
+        let request = sample_request(vec![message]);
+        let rendered = render(
+            Some("{{ messages[0].role }}|{{ messages[0].content }}|{{ messages[0].trace_key }}|{{ messages[0].metadata.step }}|{{ messages[0].labels[1] }}"),
+            &request,
+        )
+        .unwrap();
+        assert_eq!(rendered, "checkpoint|payload|blue|3|second");
     }
 
     #[test]
