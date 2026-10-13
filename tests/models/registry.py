@@ -754,6 +754,19 @@ _SEQUENCE_CLASSIFICATION_EXAMPLE_MODELS = {
     "ModernBertForSequenceClassification": _HfExamplesInfo(
         "Alibaba-NLP/gte-reranker-modernbert-base"
     ),
+    "D3ForSequenceClassification": _HfExamplesInfo(
+        "vllm-sr/d3",
+        revision="cbff3a3cb0b074b6585fe9f747b9f9f5557a0e75",
+        enforce_eager=True,
+        enable_prefix_caching=False,
+        hf_overrides={
+            "architectures": ["D3ForSequenceClassification"],
+            "num_labels": 255,
+            "decision_attention_mode": "noncausal_full_attention",
+            "decision_pooling": "last",
+            "decision_readout_dtype": "float32",
+        },
+    ),
     "RobertaForSequenceClassification": _HfExamplesInfo(
         "cross-encoder/quora-roberta-base"
     ),
