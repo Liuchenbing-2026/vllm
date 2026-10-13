@@ -76,7 +76,75 @@ def _create_vllm_config(
     return mock_config
 
 
+@pytest.mark.skip_global_cleanup
 class TestCudagraphDispatcher:
+    @pytest.mark.parametrize("exclude_none", [True, False])
+    @pytest.mark.parametrize("mode", [CUDAGraphMode.FULL, CUDAGraphMode.PIECEWISE])
+    def test_exact_token_graphs_respect_allowed_modes(self, mode, exclude_none):
+        """An uncaptured length must not silently select a forbidden fallback."""
+        compilation = CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            cudagraph_mode=mode,
+            cudagraph_capture_sizes=[4, 8],
+            cudagraph_allow_padding=False,
+        )
+        dispatcher = CudagraphDispatcher(_create_vllm_config(compilation))
+        dispatcher.initialize_cudagraph_keys(mode, uniform_decode_query_len=1)
+        restrictions = (
+            {"invalid_modes": {CUDAGraphMode.NONE}}
+            if exclude_none
+            else {"valid_modes": {mode}}
+        )
+        actual_mode, descriptor = dispatcher.dispatch(4, **restrictions)
+        assert actual_mode == mode
+        assert descriptor.num_tokens == 4
+        with pytest.raises(AssertionError, match="NONE is not in"):
+            dispatcher.dispatch(5, **restrictions)
+
+    @pytest.mark.parametrize("allow_padding", [True, False])
+    @pytest.mark.parametrize("mode", [CUDAGraphMode.FULL, CUDAGraphMode.PIECEWISE])
+    def test_exact_token_graphs_preserve_fallback_shape(self, mode, allow_padding):
+        """Non-captured lengths must keep their shape when padding is disabled."""
+        compilation = CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            cudagraph_mode=mode,
+            cudagraph_capture_sizes=[4, 8],
+            cudagraph_allow_padding=allow_padding,
+        )
+        dispatcher = CudagraphDispatcher(_create_vllm_config(compilation))
+        dispatcher.initialize_cudagraph_keys(mode, uniform_decode_query_len=1)
+        for length in [1, 4, 5, 8, 9]:
+            actual_mode, descriptor = dispatcher.dispatch(length)
+            uses_graph = length <= 8 and (allow_padding or length in [4, 8])
+            assert actual_mode == (mode if uses_graph else CUDAGraphMode.NONE)
+            expected_length = (4 if length <= 4 else 8) if uses_graph else length
+            assert descriptor.num_tokens == expected_length
+        actual_mode, descriptor = dispatcher.dispatch(
+            4, valid_modes={CUDAGraphMode.NONE}
+        )
+        assert actual_mode == CUDAGraphMode.NONE
+        assert descriptor.num_tokens == 4
+
+    @pytest.mark.parametrize("allow_padding", [True, False])
+    def test_compile_size_between_capture_sizes(self, allow_padding):
+        """A compile-only size is unchanged when graph padding is disabled."""
+        compilation = CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            cudagraph_mode=CUDAGraphMode.PIECEWISE,
+            cudagraph_capture_sizes=[4, 8],
+            compile_sizes=[5],
+            cudagraph_allow_padding=allow_padding,
+        )
+        dispatcher = CudagraphDispatcher(_create_vllm_config(compilation))
+        if allow_padding:
+            with pytest.raises(ValueError, match="padded"):
+                dispatcher.initialize_cudagraph_keys(CUDAGraphMode.PIECEWISE)
+        else:
+            dispatcher.initialize_cudagraph_keys(CUDAGraphMode.PIECEWISE)
+            mode, descriptor = dispatcher.dispatch(5)
+            assert mode == CUDAGraphMode.NONE
+            assert descriptor.num_tokens == 5
+
     @pytest.mark.parametrize(
         "cudagraph_mode_str,compilation_mode,lora_config",
         [
