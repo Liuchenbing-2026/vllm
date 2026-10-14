@@ -32,6 +32,27 @@ fn request() -> ChatRequest {
 }
 
 #[test]
+fn mid_conversation_system_before_reminder_opens_assistant_turn() {
+    let mut request = ChatRequest {
+        messages: vec![
+            ChatMessage::user("Hello"),
+            ChatMessage::assistant_text("Hi"),
+            ChatMessage::system("rules"),
+            ChatMessage::custom("latest_reminder", "Be brief"),
+        ],
+        ..ChatRequest::for_test()
+    };
+    request
+        .chat_options
+        .template_kwargs
+        .insert("thinking".to_string(), Value::Bool(false));
+    assert_eq!(
+        render(&request),
+        "<｜begin▁of▁sentence｜><｜User｜>Hello<｜Assistant｜></think>Hi<｜end▁of▁sentence｜><｜System｜>rules<｜Assistant｜></think><｜latest_reminder｜>Be brief"
+    );
+}
+
+#[test]
 fn renders_shared_deepseek_fixtures_with_v41_reference_encoding() {
     let fixture_dir =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/renderer/deepseek_v4/fixtures");

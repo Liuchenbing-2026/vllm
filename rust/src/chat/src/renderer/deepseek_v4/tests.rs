@@ -830,3 +830,27 @@ fn latest_reminder_before_assistant_still_transitions() {
     expect![[r#"<｜begin▁of▁sentence｜><｜User｜>Hello<｜Assistant｜></think><｜latest_reminder｜>Be briefHi there<｜end▁of▁sentence｜>"#]]
         .assert_eq(&rendered);
 }
+
+#[test]
+fn system_before_latest_reminder_does_not_open_assistant_turn() {
+    for trailing_assistant in [false, true] {
+        let mut request = ChatRequest {
+            messages: vec![
+                ChatMessage::system("rules"),
+                ChatMessage::custom("latest_reminder", "Be brief"),
+            ],
+            ..ChatRequest::for_test()
+        };
+        request
+            .chat_options
+            .template_kwargs
+            .insert("thinking".to_string(), Value::Bool(false));
+        let expected = if trailing_assistant {
+            request.messages.push(ChatMessage::assistant_text("Hi there"));
+            "<｜begin▁of▁sentence｜>rules<｜latest_reminder｜>Be briefHi there<｜end▁of▁sentence｜>"
+        } else {
+            "<｜begin▁of▁sentence｜>rules<｜latest_reminder｜>Be brief"
+        };
+        assert_eq!(render_request(&request), expected);
+    }
+}

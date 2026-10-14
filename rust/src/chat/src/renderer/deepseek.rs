@@ -250,7 +250,9 @@ pub(super) fn render_request_with_media_order(
                 last_user_like_message_index,
             ) {
                 Some(ChatMessage::Assistant { .. }) => true,
-                Some(ChatMessage::Custom { role, .. }) if role == "latest_reminder" => true,
+                Some(ChatMessage::Custom { role, .. }) if role == "latest_reminder" => {
+                    is_user_like_entry(message, current_render_index as usize, dialect)
+                }
                 None => request.chat_options.add_generation_prompt(),
                 Some(_) => false,
             };
