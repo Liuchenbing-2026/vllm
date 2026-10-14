@@ -16,6 +16,7 @@ from .base import BaseRenderer
 from .inputs import DictPrompt
 from .inputs.preprocess import parse_dec_only_prompt
 from .params import ChatParams
+from .tokenizer_cache import token_ids_from_cache
 
 logger = init_logger(__name__)
 
@@ -33,6 +34,15 @@ class DeepseekV4Renderer(BaseRenderer[DeepseekV4Tokenizer]):
         )
 
     def _apply_chat_template(self, *args, **kwargs):
+        # Segment-level tokenization cache; falls through while it probes this
+        # template. See ``vllm/renderers/tokenizer_cache.py``.
+        cached_ids = token_ids_from_cache(
+            self.tokenizer_cache,
+            lambda **forced: self._apply_chat_template(*args, **{**kwargs, **forced}),
+            tokenize=kwargs.get("tokenize", True),
+        )
+        if cached_ids is not None:
+            return cached_ids
         return self.get_tokenizer().apply_chat_template(*args, **kwargs)
 
     def render_messages(

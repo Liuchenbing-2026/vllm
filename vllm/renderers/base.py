@@ -57,6 +57,7 @@ from .inputs import (
 )
 from .inputs.preprocess import extract_target_prompt
 from .params import ChatParams, TokenizeParams
+from .tokenizer_cache import IncrementalTokenizerCache, maybe_attach
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -80,6 +81,14 @@ class BaseRenderer(ABC, Generic[_T]):
         self.api_process_rank = config.parallel_config._api_process_rank
 
         self.tokenizer = tokenizer
+
+        # Segment-level tokenization cache for high prefix-cache-hit serving
+        # (agent transcripts that re-send the previous turns verbatim). It is
+        # attached to the tokenizer so the module-level chat entry points can
+        # find it back; ``None`` (the default) leaves tokenization untouched.
+        self.tokenizer_cache: IncrementalTokenizerCache | None = maybe_attach(
+            self.tokenizer, config
+        )
 
         # Shared thread pool executor for blocking tokenizer and
         # multimodal preprocessing operations.  The multimodal processor
@@ -423,11 +432,22 @@ class BaseRenderer(ABC, Generic[_T]):
         prompt: TextPrompt,
         params: TokenizeParams,
     ) -> TokensPrompt:
+        encode_kwargs = params.get_encode_kwargs()
+        cache = self.tokenizer_cache
+        if cache is not None and cache.is_eligible(
+            add_special_tokens=encode_kwargs.get("add_special_tokens", True)
+        ):
+            prompt_token_ids = cache.encode(prompt["prompt"])
+            max_length = encode_kwargs.get("max_length")
+            if not (
+                encode_kwargs.get("truncation")
+                and max_length is not None
+                and len(prompt_token_ids) > max_length
+            ):
+                return TokensPrompt(prompt_token_ids=prompt_token_ids, **prompt)
+
         tokenizer = self.get_tokenizer()
-        prompt_token_ids = tokenizer.encode(
-            prompt["prompt"],
-            **params.get_encode_kwargs(),
-        )
+        prompt_token_ids = tokenizer.encode(prompt["prompt"], **encode_kwargs)
 
         return TokensPrompt(prompt_token_ids=prompt_token_ids, **prompt)
 
@@ -436,11 +456,26 @@ class BaseRenderer(ABC, Generic[_T]):
         prompt: TextPrompt,
         params: TokenizeParams,
     ) -> TokensPrompt:
+        encode_kwargs = params.get_encode_kwargs()
+        cache = self.tokenizer_cache
+        if cache is not None and cache.is_eligible(
+            add_special_tokens=encode_kwargs.get("add_special_tokens", True)
+        ):
+            # The segment lookups are cheap, but a miss tokenizes, so keep the
+            # work off the event loop exactly like the uncached path does.
+            prompt_token_ids = await asyncio.get_running_loop().run_in_executor(
+                self._executor, cache.encode, prompt["prompt"]
+            )
+            max_length = encode_kwargs.get("max_length")
+            if not (
+                encode_kwargs.get("truncation")
+                and max_length is not None
+                and len(prompt_token_ids) > max_length
+            ):
+                return TokensPrompt(prompt_token_ids=prompt_token_ids, **prompt)
+
         tokenizer = self.get_async_tokenizer()
-        prompt_token_ids = await tokenizer.encode(
-            prompt["prompt"],
-            **params.get_encode_kwargs(),
-        )
+        prompt_token_ids = await tokenizer.encode(prompt["prompt"], **encode_kwargs)
 
         return TokensPrompt(prompt_token_ids=prompt_token_ids, **prompt)
 

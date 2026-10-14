@@ -51,6 +51,7 @@ from vllm.utils.func_utils import supports_kw
 
 from .base import BaseRenderer
 from .inputs.preprocess import parse_dec_only_prompt
+from .tokenizer_cache import cache_for, token_ids_from_cache
 
 if TYPE_CHECKING:
     from collections.abc import Set
@@ -701,6 +702,29 @@ def safe_apply_chat_template(
     tokenize: bool = True,
     **kwargs,
 ) -> str | list[int]:
+    # Segment-level tokenization cache: re-rendering the same conversation
+    # prefix on every agent turn is the dominant frontend cost once the KV
+    # prefix cache hit rate is high. The cache returns exactly the ids the
+    # template would produce, or falls through on the first call while it
+    # probes this template.
+    cache = cache_for(tokenizer)
+    if tokenize and cache is not None and not kwargs.get(
+        "return_assistant_tokens_mask"
+    ):
+        cached_ids = token_ids_from_cache(
+            cache,
+            lambda **forced: safe_apply_chat_template(
+                model_config,
+                tokenizer,
+                conversation,
+                tools=tools,
+                chat_template=chat_template,
+                **{**kwargs, **forced},
+            ),
+        )
+        if cached_ids is not None:
+            return cached_ids
+
     chat_template = resolve_chat_template(
         tokenizer,
         chat_template=chat_template,
