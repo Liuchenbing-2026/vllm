@@ -916,6 +916,23 @@ class Qwen4ExpMTPConfig(Qwen4ExpForConditionalGenerationConfig):
         _strip_qwen4_exp_mrope(vllm_config.model_config)
 
 
+class PplxDeciderConfig(Qwen3_5ForConditionalGenerationConfig):
+    """Preserve the attention and pooling semantics of a decision checkpoint."""
+
+    @staticmethod
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        config = model_config.hf_config
+        attention_mode = getattr(config, "decision_attention_mode", None)
+        if attention_mode != "noncausal_full_attention":
+            raise ValueError("Decider requires noncausal_full_attention")
+        if getattr(config, "decision_pooling", None) != "last":
+            raise ValueError("Decider requires last-token pooling")
+        if getattr(config, "num_labels", 0) <= 0:
+            raise ValueError("Decider requires a positive number of decision labels")
+        config.is_causal = False
+        model_config.hf_text_config.is_causal = False
+
+
 class ColQwen3_5Config(Qwen3_5ForConditionalGenerationConfig):
     """Apply the attention contract declared by a ColQwen3.5 checkpoint."""
 
@@ -1021,6 +1038,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "JambaForSequenceClassification": JambaForSequenceClassificationConfig,
     "JinaEmbeddingsV5Model": JinaEmbeddingsV5ModelConfig,
     "JinaForRanking": JinaForRankingConfig,
+    "PplxDeciderForSequenceClassification": PplxDeciderConfig,
     "JinaVLForRanking": JinaVLForSequenceClassificationConfig,
     "KimiK3ForConditionalGeneration": KimiK3ForConditionalGenerationConfig,
     "KimiK3MTPModel": KimiK3ForConditionalGenerationConfig,

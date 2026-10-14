@@ -754,6 +754,17 @@ _SEQUENCE_CLASSIFICATION_EXAMPLE_MODELS = {
     "ModernBertForSequenceClassification": _HfExamplesInfo(
         "Alibaba-NLP/gte-reranker-modernbert-base"
     ),
+    "PplxDeciderForSequenceClassification": _HfExamplesInfo(
+        "perplexity-ai/pplx-decider-v1.1-27b",
+        enforce_eager=True,
+        enable_prefix_caching=False,
+        hf_overrides={
+            "architectures": ["PplxDeciderForSequenceClassification"],
+            "num_labels": 255,
+            "decision_attention_mode": "noncausal_full_attention",
+            "decision_pooling": "last",
+        },
+    ),
     "RobertaForSequenceClassification": _HfExamplesInfo(
         "cross-encoder/quora-roberta-base"
     ),
