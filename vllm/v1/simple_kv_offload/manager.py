@@ -3,7 +3,6 @@
 """Scheduler-side manager for SimpleCPUOffloadConnector."""
 
 import contextlib
-import os as _os
 from collections.abc import Iterable
 from copy import copy
 from dataclasses import dataclass, field, replace
@@ -58,7 +57,6 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
-_OFFLOAD_DBG = _os.environ.get("VLLM_OFFLOAD_DEBUG") == "1"
 
 
 @dataclass
@@ -205,29 +203,6 @@ class SimpleCPUOffloadScheduler:
             allow_partial_hash_hits=not lazy_offload,
         )
         self.group_block_sizes = self.cpu_coordinator.group_block_sizes
-        if _OFFLOAD_DBG:
-            try:
-                for _gi, _g in enumerate(self.cpu_kv_cache_config.kv_cache_groups):
-                    _mgr = self.cpu_coordinator.single_type_managers[_gi]
-                    _spec = _g.kv_cache_spec
-                    logger.info(
-                        "OFFDBG cfg g=%d gsize=%d spec=%s win=%s cachable=%s stable=%s "
-                        "eagle=%s align=%s block_size=%d hash_block_size=%d",
-                        _gi, self.group_block_sizes[_gi], type(_spec).__name__,
-                        getattr(_spec, "sliding_window", None),
-                        getattr(_spec, "prefix_cacheable", None),
-                        _mgr.has_positionally_stable_blocks, _mgr.use_eagle,
-                        _mgr.cache_hit_alignment_tokens, _spec.block_size,
-                        self.hash_block_size,
-                    )
-                    logger.info(
-                        "OFFDBG cfg2 g=%d mgr=%s extra_retained=%s win_blocks=%s",
-                        _gi, type(_mgr).__name__,
-                        getattr(_mgr, "extra_retained_tokens", None),
-                        getattr(_mgr, "sliding_window", None),
-                    )
-            except Exception as _e:
-                logger.info("OFFDBG cfg failed %s", _e)
         # FA group's own resolved block_size; divides scheduler_block_size (the
         # LCM) but is NOT assumed to equal it.
         self.fa_block_size: int = self.group_block_sizes[self.fa_gidx]
@@ -1241,8 +1216,6 @@ class SimpleCPUOffloadScheduler:
         gpu_pool = self._gpu_block_pool
         if state is None or gpu_pool is None:
             return
-        if _OFFLOAD_DBG:
-            self._dbg_flush_report(request, block_ids, state)
         gpu_ids, _, block_meta = self._select_eager_blocks_to_store(state, block_ids)
         partial_tail = self._find_fa_partial_tail_source(request, block_ids)
         if (
@@ -1267,81 +1240,6 @@ class SimpleCPUOffloadScheduler:
         )
         self._in_flight_store_gpu_blocks.update(gpu_ids)
         gpu_pool.touch([gpu_pool.blocks[bid] for bid in gpu_ids])
-
-    def _dbg_flush_report(self, request, block_ids, state) -> None:
-        pool = self._gpu_block_pool
-        if pool is None:
-            return
-        try:
-            ncached = len(pool.cached_block_hash_to_block)
-        except Exception:
-            ncached = -1
-        for g, ids in enumerate(block_ids):
-            if g >= len(self.group_block_sizes):
-                break
-            gsize = self.group_block_sizes[g]
-            resolved = resolve_block_hashes(
-                request.block_hashes, self.hash_block_size, gsize
-            )
-            n = min(len(ids), len(resolved))
-            c = {"null": 0, "unhashed": 0, "ok_res": 0, "ok_unres": 0, "mismatch": 0}
-            first_bad = -1
-            for i in range(n):
-                b = pool.blocks[ids[i]]
-                if b.is_null:
-                    c["null"] += 1
-                    if first_bad < 0:
-                        first_bad = i
-                    continue
-                exp = make_block_hash_with_group_id(resolved[i], g)
-                if b.block_hash is None:
-                    c["unhashed"] += 1
-                    if first_bad < 0:
-                        first_bad = i
-                    continue
-                if b.block_hash == exp:
-                    if self._cached_gpu_block(resolved, i, g) is not None:
-                        c["ok_res"] += 1
-                    else:
-                        c["ok_unres"] += 1
-                        if first_bad < 0:
-                            first_bad = i
-                else:
-                    c["mismatch"] += 1
-                    if first_bad < 0:
-                        first_bad = i
-            logger.info(
-                "OFFDBG flush req=%s g=%d gsize=%d n_ids=%d n_hashes=%d "
-                "null=%d unhashed=%d ok_resolvable=%d ok_not_in_pool=%d mismatch=%d "
-                "first_bad=%d pool_cached=%d pool_free=%d stored=%s pending=%d",
-                request.request_id, g, gsize, len(ids), len(resolved),
-                c["null"], c["unhashed"], c["ok_res"], c["ok_unres"], c["mismatch"],
-                first_bad, ncached, pool.get_num_free_blocks(),
-                state.num_stored_blocks[g],
-                len(state.pending_unhashed_blocks.get(g, ())),
-            )
-            # OFFDBG2: how much of this group is actually reachable for a
-            # future lookup, and where does the coverage stop?
-            try:
-                covered = []
-                in_gpu = 0
-                for _i in range(len(resolved)):
-                    _blk = self._cached_gpu_block(resolved, _i, g)
-                    if _blk is not None:
-                        in_gpu += 1
-                    _h = make_block_hash_with_group_id(resolved[_i], g)
-                    if self.cpu_block_pool.cached_block_hash_to_block.get_one_block(_h) is not None:
-                        covered.append(_i)
-                _tail = covered[-8:] if covered else []
-                logger.info(
-                    "OFFDBG2 pool req=%s g=%d n=%d gpu_resolvable=%d cpu_covered=%d "
-                    "max_pos=%s tail=%s",
-                    request.request_id, g, len(resolved), in_gpu, len(covered),
-                    (covered[-1] if covered else -1), _tail,
-                )
-            except Exception as _e:
-                logger.info("OFFDBG2 failed %s", _e)
-        return None
 
     def _find_fa_partial_tail_source(
         self, request: "Request", block_ids: tuple[list[int], ...]
