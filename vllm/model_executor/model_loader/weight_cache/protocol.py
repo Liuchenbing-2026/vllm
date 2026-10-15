@@ -23,7 +23,6 @@ from dataclasses import dataclass, fields
 from typing import Any
 
 import torch
-from torch.multiprocessing.reductions import rebuild_cuda_tensor, reduce_tensor
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
 import vllm.version
@@ -62,24 +61,16 @@ class UnsupportedQuantForIPCError(Exception):
 
 
 class UnsupportedPlatformForIPCError(Exception):
-    """Raised when the current platform cannot share CUDA IPC handles."""
+    """Raised when the current platform cannot share device IPC handles."""
 
 
 def check_ipc_platform_support() -> None:
-    """Hard-error unless the current platform can share CUDA IPC handles.
-
-    Only CUDA/ROCm tensors get a real IPC handle from ``TensorEntry``; other
-    platforms (e.g. XPU) would silently ship every tensor by value instead.
-
-    Raises:
-        UnsupportedPlatformForIPCError: If the current platform is not
-            CUDA/ROCm.
-    """
-    if current_platform.is_cuda_alike():
+    """Reject unsupported devices before any disk-loading fallback."""
+    if current_platform.supports_weight_cache():
         return
     raise UnsupportedPlatformForIPCError(
-        f"platform {current_platform.device_name!r} does not support CUDA IPC "
-        "weight sharing; only CUDA and ROCm are supported. Use the default "
+        f"platform {current_platform.device_name!r} does not support IPC "
+        "weight sharing. Use the default "
         "--load-format for this platform."
     )
 
@@ -314,8 +305,8 @@ class WeightCacheKey:
 class TensorEntry:
     """A single cached tensor.
 
-    CUDA tensors are exported as `torch.multiprocessing` reduction args
-    (CUDA IPC handles); non-CUDA tensors are shipped by value.
+    Device tensors are exported through the platform's IPC implementation;
+    CPU tensors are shipped by value.
     """
 
     kind: str
@@ -326,21 +317,19 @@ class TensorEntry:
     @classmethod
     def from_tensor(cls, tensor: torch.Tensor, kind: str) -> "TensorEntry":
         tensor = tensor.detach()
-        if tensor.is_cuda:
-            _, ipc_args = reduce_tensor(tensor)
-            return cls(kind=kind, ipc_args=ipc_args)
-        return cls(kind=kind, cpu_tensor=tensor.cpu())
+        if tensor.device.type == "cpu":
+            return cls(kind=kind, cpu_tensor=tensor)
+        check_ipc_platform_support()
+        return cls(
+            kind=kind,
+            ipc_args=current_platform.reduce_weight_cache_tensor(tensor),
+        )
 
     def rebuild(self, device_index: int) -> torch.Tensor:
         if self.ipc_args is None:
             assert self.cpu_tensor is not None
             return self.cpu_tensor
-        args = list(self.ipc_args)
-        # Index 6 of the args from reduce_tensor is the device index. It must
-        # be retargeted to the local index since the daemon and the engine may
-        # have different CUDA_VISIBLE_DEVICES mappings.
-        args[6] = device_index
-        return rebuild_cuda_tensor(*args)
+        return current_platform.rebuild_weight_cache_tensor(self.ipc_args, device_index)
 
 
 def send_msg(sock: socket.socket, obj: Any) -> None:

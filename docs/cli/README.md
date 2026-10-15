@@ -9,8 +9,19 @@ vllm --help
 Available Commands:
 
 ```bash
-vllm {chat,complete,serve,launch,bench,collect-env,run-batch}
+vllm {chat,complete,serve,preload,launch,bench,collect-env,run-batch}
 ```
+
+## preload
+
+Keep model weights resident for fast engine restarts:
+
+```bash
+vllm preload /path/to/model --tensor-parallel-size 2
+```
+
+See [Preload model weights](../features/preload.md) for engine configuration,
+cache lifetime and platform requirements.
 
 ## serve
 

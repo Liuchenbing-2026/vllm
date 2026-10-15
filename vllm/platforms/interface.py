@@ -221,6 +221,37 @@ class Platform:
         """Stateless version of [torch.cuda.is_available][]."""
         return self._enum in (PlatformEnum.CUDA, PlatformEnum.ROCM)
 
+    def supports_weight_cache(self) -> bool:
+        """Whether device tensors support cross-process weight sharing."""
+        return self.is_cuda_alike()
+
+    @classmethod
+    def initialize_weight_cache(cls, vllm_config: "VllmConfig") -> None:
+        """Initialize platform model-loading state in a daemon without a worker."""
+        pass
+
+    @classmethod
+    def reduce_weight_cache_tensor(cls, tensor: torch.Tensor) -> tuple:
+        """Export device storage without copying it to host memory."""
+        from torch.multiprocessing.reductions import reduce_tensor
+
+        if not tensor.is_cuda:
+            raise ValueError(f"Unsupported weight cache device: {tensor.device}")
+        _, args = reduce_tensor(tensor)
+        return args
+
+    @classmethod
+    def rebuild_weight_cache_tensor(
+        cls, args: tuple, device_index: int
+    ) -> torch.Tensor:
+        """Import storage on the consumer's local ordinal of the same device."""
+        from torch.multiprocessing.reductions import rebuild_cuda_tensor
+
+        local_args = list(args)
+        # PyTorch's reduction tuple stores the storage device at index 6.
+        local_args[6] = device_index
+        return rebuild_cuda_tensor(*local_args)
+
     def is_sleep_mode_available(self) -> bool:
         # TODO: Actually only mi3xx has the sleep mode support now
         # for ROCm, but currently we don't have a way to detect the

@@ -43,8 +43,10 @@ assignment, so each engine worker maps its shard from the daemon on its own
 node.
 """
 
+import argparse
 import contextlib
 import fcntl
+import gc
 import multiprocessing
 import os
 import queue
@@ -190,6 +192,7 @@ class WeightCacheDaemon:
         )
         with set_current_vllm_config(self.vllm_config):
             ensure_model_parallel_initialized(tp_size, 1)
+            current_platform.initialize_weight_cache(self.vllm_config)
             self.model = get_daemon_model(self.vllm_config)
         logger.info(
             "Weight cache daemon rank %d loaded model",
@@ -312,10 +315,21 @@ class WeightCacheDaemon:
         )
 
     def _handle_release(self, conn: socket.socket) -> None:
-        self.model = None
-        torch.accelerator.empty_cache()
+        self._release_model()
         logger.info("Weight cache daemon rank %d released cached weights", self.tp_rank)
         send_msg(conn, {"status": "ok"})
+
+    def _release_model(self) -> None:
+        from vllm.model_executor.layers.rotary_embedding import _ROPE_DICT
+
+        # Attention layers are also owned by the compilation context; dropping
+        # only self.model leaves their exported storage alive until process exit.
+        torch.accelerator.synchronize()
+        self.model = None
+        self.vllm_config.compilation_config.static_forward_context.clear()
+        _ROPE_DICT.clear()
+        gc.collect()
+        torch.accelerator.empty_cache()
 
 
 def _run_daemon(
@@ -326,11 +340,20 @@ def _run_daemon(
     socket_dir: str | None,
     ready_queue: "multiprocessing.Queue[int]",
 ) -> None:
+    def shutdown(signum, frame):
+        # Run serve_forever's finally block instead of leaving a stale socket.
+        raise SystemExit(0)
+
+    signal.signal(signal.SIGTERM, shutdown)
+    signal.signal(signal.SIGINT, shutdown)
     daemon = WeightCacheDaemon(
         vllm_config, tp_rank, local_rank, distributed_init_method, socket_dir
     )
     daemon.load_model()
-    daemon.serve_forever(ready_callback=lambda: ready_queue.put(tp_rank))
+    try:
+        daemon.serve_forever(ready_callback=lambda: ready_queue.put(tp_rank))
+    finally:
+        daemon._release_model()
 
 
 def _reject_unsupported_parallelism(parallel_config: ParallelConfig) -> None:
@@ -347,10 +370,8 @@ def _reject_unsupported_parallelism(parallel_config: ParallelConfig) -> None:
             )
 
 
-def main() -> None:
-    parser = FlexibleArgumentParser(
-        description="Launch weight cache daemons (one per TP rank)."
-    )
+def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
+    """Arguments shared by the module launcher and ``vllm preload``."""
     EngineArgs.add_cli_args(parser)
     parser.add_argument(
         "--weight-cache-socket-dir",
@@ -367,7 +388,13 @@ def main() -> None:
         "serving) and match across nodes. Required when --nnodes > 1; defaults "
         "to a free port for single-node.",
     )
-    args = parser.parse_args()
+    return parser
+
+
+def run(args: argparse.Namespace) -> None:
+    """Keep weights resident until the preload process is stopped."""
+    if getattr(args, "model_tag", None):
+        args.model = args.model_tag
     engine_args = EngineArgs.from_cli_args(args)
     vllm_config = engine_args.create_engine_config()
     if vllm_config.load_config.load_format == "ipc_cache":
@@ -458,6 +485,13 @@ def main() -> None:
     for proc in procs:
         proc.join()
     sys.exit(max(proc.exitcode or 0 for proc in procs))
+
+
+def main() -> None:
+    parser = FlexibleArgumentParser(
+        description="Launch weight cache daemons (one per TP rank)."
+    )
+    run(add_cli_args(parser).parse_args())
 
 
 if __name__ == "__main__":
