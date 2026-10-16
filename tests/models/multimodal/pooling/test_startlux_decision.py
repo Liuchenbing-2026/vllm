@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 import torch
 
+from vllm.model_executor.models.config import StartLuxDecisionConfig
 from vllm.model_executor.models.qwen3_5 import Qwen3_5ForConditionalGeneration
 from vllm.model_executor.models.startlux_decision import (
     StartLuxDecisionForSequenceClassification,
@@ -16,6 +17,25 @@ from vllm.model_executor.models.startlux_decision import (
 
 
 class TestStartLuxDecisionPooler(unittest.TestCase):
+    def test_prompt_attention_is_applied_to_full_attention_config(self):
+        for mode, expected in [
+            (None, True),
+            ("causal", True),
+            ("bidirectional", False),
+        ]:
+            hf = SimpleNamespace()
+            if mode is not None:
+                hf.jev_prompt_attention = mode
+            text = SimpleNamespace(layer_types=["linear_attention", "full_attention"])
+            config = SimpleNamespace(hf_config=hf, hf_text_config=text)
+            StartLuxDecisionConfig.verify_and_update_model_config(config)
+            self.assertIs(hf.is_causal, expected)
+            self.assertIs(text.is_causal, expected)
+            self.assertEqual(text.layer_types, ["linear_attention", "full_attention"])
+        hf.jev_prompt_attention = "unknown"
+        with self.assertRaisesRegex(ValueError, "Unsupported StartLux"):
+            StartLuxDecisionConfig.verify_and_update_model_config(config)
+
     def test_last_positions_keep_raw_candidate_logits(self):
         # Nonconsecutive vocabulary rows catch TP-local/vocabulary index confusion.
         pooler = StartLuxDecisionPooler([1, 6, 3], 4)
