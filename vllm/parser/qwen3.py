@@ -96,6 +96,7 @@ def qwen3_config(
     tool_start: str = TOOL_CALL_START,
     tool_end: str = TOOL_CALL_END,
     turn_boundary_tokens: frozenset[str] = frozenset(),
+    strip_leading_content_whitespace: bool = False,
 ) -> ParserEngineConfig:
     return ParserEngineConfig(
         name=name,
@@ -197,6 +198,7 @@ def qwen3_config(
         },
         arg_converter=_qwen3_arg_converter,
         stream_arg_deltas=True,
+        strip_leading_content_whitespace=strip_leading_content_whitespace,
         strip_trailing_reasoning_whitespace=False,
         tool_args_json=False,
     )
@@ -220,6 +222,11 @@ class Qwen3Parser(ParserEngine):
     TOOL_START = TOOL_CALL_START
     TOOL_END = TOOL_CALL_END
     TURN_BOUNDARIES: frozenset[str] = CHATML_TURN_BOUNDARIES
+    # The official Qwen3 chat template separates ``</think>`` from the answer
+    # with a blank line, so the separator has to be dropped from the content.
+    # Models that share this grammar but use their own template (and their own
+    # parser engine config) keep the leading whitespace.
+    STRIP_LEADING_CONTENT_WHITESPACE: bool = True
 
     def __init__(
         self,
@@ -239,6 +246,9 @@ class Qwen3Parser(ParserEngine):
                 tool_start=self.TOOL_START,
                 tool_end=self.TOOL_END,
                 turn_boundary_tokens=self.TURN_BOUNDARIES,
+                strip_leading_content_whitespace=(
+                    self.STRIP_LEADING_CONTENT_WHITESPACE
+                ),
             ),
         )
         super().__init__(

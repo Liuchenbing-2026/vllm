@@ -100,6 +100,11 @@ class ParserEngineConfig:
     # Prevents trailing-whitespace accumulation across multi-turn conversations.
     strip_trailing_reasoning_whitespace: bool = True
 
+    # Trim leading whitespace of the content region. Templates that separate
+    # reasoning from the answer with markup (e.g. Qwen3's "</think>\n\n") leave
+    # that separator at the head of the content; enable to drop it.
+    strip_leading_content_whitespace: bool = False
+
     # Drop content that is entirely whitespace when tool calls follow.
     drop_whitespace_only_content_before_tools: bool = True
 

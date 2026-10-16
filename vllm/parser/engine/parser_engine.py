@@ -143,6 +143,13 @@ class ParserEngine(Parser):
         self._strip_content_ws_with_tools = (
             parser_engine_config.strip_content_whitespace_with_tools
         )
+        self._strip_leading_content_ws = (
+            parser_engine_config.strip_leading_content_whitespace
+        )
+        tool_start = parser_engine_config.terminals.get("TOOL_START")
+        self._tool_start_literals: tuple[str, ...] = (
+            (tool_start,) if isinstance(tool_start, str) else tuple(tool_start or ())
+        )
 
         vocab = self.vocab
         self._reasoning_start_token_id: int | None = None
@@ -446,7 +453,26 @@ class ParserEngine(Parser):
                 content = content.strip()
             elif self._drop_ws_only_content_before_tools and not content.strip():
                 content = ""
+        elif self._strip_leading_content_ws:
+            content = self._lstrip_template_separator(content)
         return content or None
+
+    def _lstrip_template_separator(self, content: str) -> str:
+        """Drop the whitespace a chat template put in front of the answer.
+
+        Handles Qwen3's ``</think>\\n\\n<answer>``, whose separator newlines
+        would otherwise open every ``content``. Two cases are deliberately left
+        untouched: a content region that is *entirely* whitespace — that region
+        is still meaningful to ``drop_whitespace_only_content_before_tools``
+        and to the streaming content holdback — and an unparsed tool block left
+        in the content by ``skip_tool_parsing``, which is replayed verbatim.
+        """
+        stripped = content.lstrip()
+        if not stripped:
+            return content
+        if stripped.startswith(self._tool_start_literals):
+            return content
+        return stripped
 
     # ── Streaming: parse_delta ────────────────────────────────────────
 
@@ -538,6 +564,8 @@ class ParserEngine(Parser):
             raw_reasoning = raw_reasoning.rstrip()
         reasoning = raw_reasoning or None
         content = "".join(content_parts) or None
+        if content is not None and self._strip_leading_content_ws:
+            content = self._lstrip_template_separator(content) or None
         return reasoning, content
 
     # ── Non-streaming: extract_reasoning_streaming ────────────────────
@@ -840,6 +868,11 @@ class ParserEngine(Parser):
             self._deferred_content = ""
 
         content_str = "".join(content_parts)
+
+        if self._strip_leading_content_ws and not self._content_has_nonws:
+            # Markup-separated templates (Qwen3's "</think>\n\n") leave the
+            # separator at the head of the content region.
+            content_str = self._lstrip_template_separator(content_str)
 
         if self._content_has_nonws:
             pass

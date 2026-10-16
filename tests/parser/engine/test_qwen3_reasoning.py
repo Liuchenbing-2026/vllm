@@ -750,3 +750,93 @@ class TestThinkingDisabled:
         reasoning, content = p.extract_reasoning("The answer is 42.", None)
         assert reasoning is None
         assert content == "The answer is 42."
+
+
+class TestLeadingContentWhitespaceStripping:
+    """The Qwen3 chat template separates ``</think>`` from the answer with a
+    blank line. That separator belongs to the template, not to the answer, so
+    it must not leak into ``content``.
+    """
+
+    def test_non_streaming_leading_blank_line_dropped(self, parser):
+        text = "<think>Let me analyze.</think>\n\n你好，有什么我可以帮你的吗？"
+        reasoning, content = parser.extract_reasoning(text, None)
+        assert reasoning == "Let me analyze."
+        assert content == "你好，有什么我可以帮你的吗？"
+
+    def test_non_streaming_leading_spaces_and_tabs_dropped(self, parser):
+        text = "Reasoning.</think>\n \t\nAnswer."
+        reasoning, content = parser.extract_reasoning(text, None)
+        assert reasoning == "Reasoning."
+        assert content == "Answer."
+
+    def test_non_streaming_internal_whitespace_preserved(self, parser):
+        text = "Reasoning.</think>\n\nFirst line.\n\nSecond line."
+        reasoning, content = parser.extract_reasoning(text, None)
+        assert content == "First line.\n\nSecond line."
+
+    def test_non_streaming_whitespace_only_content_kept(self, parser):
+        """A whitespace-only content region is left alone.
+
+        It is not the template separator: when a tool call follows, the
+        pipeline drops it via ``drop_whitespace_only_content_before_tools``
+        (see ``test_parsed_tool_call_after_separator_drops_separator``).
+        """
+        text = "Reasoning.</think>\n\n"
+        reasoning, content = parser.extract_reasoning(text, None)
+        assert reasoning == "Reasoning."
+        assert content == "\n\n"
+
+    def test_streaming_separator_split_across_deltas(self, parser):
+        reasoning, content = simulate_reasoning_streaming(
+            parser,
+            ["<think>Let me analyze.</think>", "\n\n", "你好，有什么我可以帮你的吗？"],
+            [
+                (_THINK_START_ID, 1, _THINK_END_ID),
+                (2,),
+                (3,),
+            ],
+        )
+        assert reasoning == "Let me analyze."
+        assert content == "你好，有什么我可以帮你的吗？"
+
+    def test_streaming_separator_grouped_with_answer(self, parser):
+        reasoning, content = simulate_reasoning_streaming(
+            parser,
+            ["reasoning", "</think>\n\nthe answer"],
+            [
+                (1,),
+                (_THINK_END_ID, 2),
+            ],
+        )
+        assert reasoning == "reasoning"
+        assert content == "the answer"
+
+    def test_streaming_internal_newlines_preserved(self, parser):
+        reasoning, content = simulate_reasoning_streaming(
+            parser,
+            ["reasoning", "</think>", "\n\nfirst", "\n\nsecond"],
+            [
+                (1,),
+                (_THINK_END_ID,),
+                (2,),
+                (3,),
+            ],
+        )
+        assert reasoning == "reasoning"
+        assert content == "first\n\nsecond"
+
+    def test_parsed_tool_call_after_separator_drops_separator(
+        self, parser, mock_request
+    ):
+        """A parsed tool call still drops the whitespace-only separator."""
+        text = (
+            "<think>I need to list files.</think>\n\n"
+            "<tool_call>\n<function=bash>\n"
+            "<parameter=cmd>ls</parameter>\n"
+            "</function>\n</tool_call>"
+        )
+        reasoning, content, tool_calls = parser.parse(text, mock_request)
+        assert reasoning == "I need to list files."
+        assert content is None
+        assert tool_calls is not None and tool_calls[0].name == "bash"
