@@ -179,6 +179,9 @@ class ChatCompletionStreamResponse(OpenAIBaseModel):
     # ``return_prompt_text=True`` on the request); only sent on the first chunk.
     prompt_text: str | None = None
     metrics: PerRequestMetrics | None = None
+    kv_transfer_params: dict[str, Any] | None = Field(
+        default=None, description="KVTransfer parameters."
+    )
 
 
 class ChatCompletionToolsParam(OpenAIBaseModel):

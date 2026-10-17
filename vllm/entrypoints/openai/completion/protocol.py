@@ -705,3 +705,6 @@ class CompletionStreamResponse(OpenAIBaseModel):
     # without the per-chunk serialization overhead.
     system_fingerprint: str | None = None
     metrics: PerRequestMetrics | None = None
+    kv_transfer_params: dict[str, Any] | None = Field(
+        default=None, description="KVTransfer parameters."
+    )

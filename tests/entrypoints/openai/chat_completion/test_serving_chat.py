@@ -35,6 +35,8 @@ from vllm.entrypoints.openai.chat_completion.serving import (
     _make_completion_tokens_details,
     _make_prompt_tokens_details,
 )
+from vllm.entrypoints.openai.completion.protocol import CompletionRequest
+from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
 from vllm.entrypoints.openai.models.serving import (
     BaseModelPath,
     OpenAIModelRegistry,
@@ -676,6 +678,79 @@ async def _stream_request_outputs(
 ) -> AsyncIterator[RequestOutput]:
     for request_output in request_outputs:
         yield request_output
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("chat", [False, True])
+@pytest.mark.parametrize("include_usage", [False, True])
+@pytest.mark.parametrize("params", [None, {"remote_num_tokens": 3}])
+async def test_streaming_kv_params_only_on_finished_choice(chat, include_usage, params):
+    """Publish the engine's final KV descriptor before DONE, with or without usage."""
+    serving = _build_minimal_metrics_serving_chat(enable_per_request_metrics=False)
+    first = _make_metrics_request_output(token_ids=(100,))
+    first.finished = False
+    first.outputs[0].finish_reason = None
+    first.kv_transfer_params = params
+    final = _make_metrics_request_output(token_ids=(101,))
+    final.kv_transfer_params = params
+    options = dict(
+        model="test-model",
+        max_tokens=2,
+        stream=True,
+        return_token_ids=True,
+        stream_options={"include_usage": include_usage},
+    )
+    metadata = RequestResponseMetadata(request_id="test-id")
+    if chat:
+        request = ChatCompletionRequest(
+            messages=[{"role": "user", "content": "Test"}], **options
+        )
+        stream = serving.chat_completion_stream_generator(
+            request,
+            _stream_request_outputs(first, final),
+            "test-id",
+            "test-model",
+            conversation=[{"role": "user", "content": "Test"}],
+            tokenizer=MagicMock(),
+            request_metadata=metadata,
+        )
+    else:
+        completion = OpenAIServingCompletion.__new__(OpenAIServingCompletion)
+        completion.__dict__.update(serving.__dict__)
+
+        async def indexed_outputs():
+            async for output in _stream_request_outputs(first, final):
+                yield 0, output
+
+        stream = completion.completion_stream_generator(
+            CompletionRequest(prompt=[1, 2, 3], **options),
+            [],
+            indexed_outputs(),
+            "test-id",
+            0,
+            "test-model",
+            1,
+            None,
+            metadata,
+        )
+    lines = [line async for line in stream]
+    assert lines[-1].strip() == "data: [DONE]"
+    chunks = [json.loads(line[6:]) for line in lines[:-1]]
+    assert not any("error" in chunk for chunk in chunks)
+    choices = [(chunk, choice) for chunk in chunks for choice in chunk["choices"]]
+    assert [token for _, c in choices for token in (c.get("token_ids") or [])] == [
+        100,
+        101,
+    ]
+    terminal = [chunk for chunk, choice in choices if choice.get("finish_reason")]
+    assert len(terminal) == 1
+    assert terminal[0].get("kv_transfer_params") == params
+    assert all(
+        chunk.get("kv_transfer_params") is None
+        for chunk, choice in choices
+        if not choice.get("finish_reason")
+    )
+    assert bool([chunk for chunk in chunks if chunk.get("usage")]) == include_usage
 
 
 async def _collect_metrics_stream_chunks(
