@@ -153,6 +153,43 @@ def test_context_sensitive_added_tokens_disable_cache(tokenizer, flag):
     assert not SegmentTokenizerCache(tokenizer, 0.001).enabled
 
 
+@pytest.mark.parametrize(
+    "single_word", [False, True], ids=["delimiter", "word-boundary"]
+)
+def test_added_token_word_boundary_preserves_full_encoding(single_word):
+    alphabet = sorted(pre_tokenizers.ByteLevel.alphabet())
+    vocab = {token: i for i, token in enumerate(alphabet)}
+    vocab["zb"] = len(vocab)
+    backend = Tokenizer(models.BPE(vocab=vocab, merges=[("z", "b")]))
+    backend.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
+    backend.add_special_tokens(["<a>", "<b>", "<c>"])
+    backend.add_tokens([AddedToken("zzzz", single_word=single_word, normalized=False)])
+    tokenizer = TokenizersBackend(tokenizer_object=backend)
+    text = "azzzzb<a>tail"
+    expected = tokenizer(text, add_special_tokens=False)["input_ids"]
+    head, tail = text.split("zzzz", 1)
+    literal_split = (
+        tokenizer(head + "zzzz", add_special_tokens=False)["input_ids"]
+        + tokenizer(tail, add_special_tokens=False)["input_ids"]
+    )
+    assert (literal_split != expected) == single_word
+
+    cache = SegmentTokenizerCache(tokenizer, 0.001)
+    assert cache.enabled != single_word
+    for _ in range(2):
+        actual = cache.encode(text, add_special_tokens=False)
+        if single_word:
+            assert actual is None
+            actual = tokenizer(text, add_special_tokens=False)["input_ids"]
+        else:
+            assert actual is not None
+        assert actual == expected
+    if single_word:
+        assert cache.lookups == 0
+    else:
+        assert cache.hits > 0
+
+
 def test_prefix_space_and_metaspace_disable_cache(tokenizer):
     for pre in [
         pre_tokenizers.ByteLevel(add_prefix_space=True),
