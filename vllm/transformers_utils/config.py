@@ -18,6 +18,7 @@ from packaging.version import Version
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
 from transformers import GenerationConfig, PretrainedConfig
 from transformers.configuration_utils import ALLOWED_LAYER_TYPES
+from transformers.models.auto import CONFIG_MAPPING
 from transformers.models.auto.image_processing_auto import get_image_processor_config
 from transformers.models.auto.modeling_auto import (
     MODEL_MAPPING_NAMES,
@@ -182,11 +183,72 @@ _AUTO_CONFIG_KWARGS_OVERRIDES: dict[str, dict[str, Any]] = {
 }
 
 
+_ALIASED_CONFIG_CLASSES: dict[
+    tuple[str, type[PretrainedConfig]], type[PretrainedConfig]
+] = {}
+
+
+def _rebuild_config_with_model_type(
+    model_type: str, config_class: type[PretrainedConfig], state: dict[str, Any]
+) -> PretrainedConfig:
+    """Rebuild an aliased config when unpickling.
+
+    The alias classes created by :func:`_config_class_for_model_type` are
+    generated at runtime, so they need an explicit reduce helper to survive
+    pickling (e.g. when a config is sent to worker processes).
+    """
+    aliased = _config_class_for_model_type(model_type, config_class)
+    config = aliased.__new__(aliased)
+    config.__dict__.update(state)
+    return config
+
+
+def _config_class_for_model_type(
+    model_type: str, config_class: type[PretrainedConfig]
+) -> type[PretrainedConfig]:
+    """Return a config class that serializes with ``model_type``.
+
+    ``PretrainedConfig.to_dict`` writes ``self.__class__.model_type``, so a
+    config class shared by several aliases (e.g. ``kimi_k2`` and
+    ``deepseek_v32``) cannot carry one stable identity per alias.  Registering
+    a cached subclass keeps the shared class untouched, so loading another
+    alias no longer rewrites the serialized identity of previously loaded
+    configs.
+    """
+    if getattr(config_class, "model_type", None) == model_type:
+        return config_class
+    key = (model_type, config_class)
+    aliased = _ALIASED_CONFIG_CLASSES.get(key)
+    if aliased is None:
+
+        def __reduce__(self):
+            return _rebuild_config_with_model_type, (
+                model_type,
+                config_class,
+                self.__dict__,
+            )
+
+        aliased = type(
+            f"{config_class.__name__}_{model_type}",
+            (config_class,),
+            {"model_type": model_type, "__reduce__": __reduce__},
+        )
+        _ALIASED_CONFIG_CLASSES[key] = aliased
+    return aliased
+
+
 def _register_config_class(
     model_type: str, config_class: type[PretrainedConfig]
 ) -> None:
-    config_class.model_type = model_type
-    AutoConfig.register(model_type, config_class, exist_ok=True)
+    # ``CONFIG_MAPPING.register`` is used instead of ``AutoConfig.register``
+    # because the latter rejects a class whose ``model_type`` does not match
+    # the registration key, while an alias class intentionally carries the
+    # requested identity.
+    CONFIG_MAPPING.register(
+        model_type,
+        _config_class_for_model_type(model_type, config_class),
+        exist_ok=True,
+    )
 
 
 def _maybe_register_hf_config(config: PretrainedConfig | None) -> None:
@@ -330,8 +392,14 @@ class HFConfigParser(ConfigParserBase):
                 if (
                     config_model_type := config_dict.get("model_type")
                 ) and config_model_type != model_type:
-                    _register_config_class(config_model_type, config_class)
-                    config_class.model_type = model_type
+                    # Register the checkpoint's own model_type as an alias of
+                    # the requested config class so AutoConfig can resolve it,
+                    # while keeping the requested ``model_type`` on the class.
+                    CONFIG_MAPPING.register(
+                        config_model_type,
+                        _config_class_for_model_type(model_type, config_class),
+                        exist_ok=True,
+                    )
                 # Now that it is registered, it is not considered remote code anymore
                 trust_remote_code = False
             try:
