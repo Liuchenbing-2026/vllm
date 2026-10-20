@@ -225,6 +225,26 @@ def test_prompt_logprobs_requests_keep_their_rows(state):
     assert build.batch.max_query_len == 300
 
 
+def test_prompt_logprob_token_ids_requests_keep_their_rows(state):
+    """Token-id scoring reads every prompt row, so it never trims; the other
+    prefills still do."""
+    state.add_request(
+        1,
+        SimpleNamespace(
+            replay_start=0,
+            sampling_params=SimpleNamespace(
+                prompt_logprobs=None,
+                prompt_logprob_token_ids=np.zeros((300, 2), dtype=np.int32),
+            ),
+        ),
+    )
+    batch = _input_batch([1, 300, 300], [500, 300, 300], PREFILLING)
+    replay, build = _prepare(state, batch, CUDAGraphMode.NONE)
+    assert replay is not None
+    assert replay.rows.tolist() == [0, *range(1, 301), *range(601 - WINDOW, 601)]
+    assert build.batch.max_query_len == 300
+
+
 @pytest.mark.parametrize("cg_mode", [CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE])
 def test_aux_output_requests_keep_every_routing_row(state, cg_mode):
     """R3 needs every prefill row even when final logits only need the window."""
@@ -234,7 +254,9 @@ def test_aux_output_requests_keep_every_routing_row(state, cg_mode):
             index,
             SimpleNamespace(
                 replay_start=0,
-                sampling_params=SimpleNamespace(prompt_logprobs=None),
+                sampling_params=SimpleNamespace(
+                    prompt_logprobs=None, prompt_logprob_token_ids=None
+                ),
             ),
         )
     batch = _input_batch(QUERY_LENS, SEQ_LENS, PREFILLING)
