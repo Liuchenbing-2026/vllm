@@ -47,6 +47,7 @@ from vllm.tool_parsers.utils import (
     CUSTOM_TOOL_INPUT_KEY,
     build_responses_tool_call_name_map,
     flat_namespace_tool_name,
+    get_allowed_function_tool_names,
     iter_response_function_tool_dicts,
     resolve_responses_tool_call_name,
 )
@@ -508,7 +509,13 @@ def construct_tool_dicts(
 ) -> list[dict[str, Any]] | None:
     if not tools or (tool_choice == "none" and exclude_tools_when_tool_choice_none):
         return None
-    return [
+    tool_dicts = [
         convert_tool_responses_to_completions_format(tool).model_dump()
         for tool in iter_response_function_tool_dicts(tools)
     ]
+    allowed_names = get_allowed_function_tool_names(tool_choice)
+    if allowed_names is not None:
+        tool_dicts = [
+            tool for tool in tool_dicts if tool["function"]["name"] in allowed_names
+        ]
+    return tool_dicts

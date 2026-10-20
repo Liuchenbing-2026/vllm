@@ -20,6 +20,7 @@ from openai.types.responses import (
     ToolChoiceFunction,
 )
 from openai.types.responses.tool import Tool as ResponsesTool
+from openai.types.responses.tool_choice_allowed import ToolChoiceAllowed
 from partial_json_parser.core.options import Allow
 
 from vllm.entrypoints.generate.base.protocol import (
@@ -40,6 +41,40 @@ Tool: TypeAlias = ChatCompletionToolsParam | ResponsesTool
 logger = init_logger(__name__)
 
 CUSTOM_TOOL_INPUT_KEY = "input"
+
+
+def get_allowed_function_tool_names(
+    tool_choice: Any,
+) -> set[str] | None:
+    """Return function names selected by Responses ``allowed_tools``.
+
+    ``None`` means the request does not use ``allowed_tools``. Entries for
+    non-function tools are ignored here because this helper only describes
+    the function tools rendered through chat templates.
+    """
+    if isinstance(tool_choice, ToolChoiceAllowed):
+        tool_refs = tool_choice.tools
+    elif isinstance(tool_choice, dict) and tool_choice.get("type") == "allowed_tools":
+        tool_refs = tool_choice.get("tools", [])
+    else:
+        return None
+
+    names: set[str] = set()
+    for tool_ref in tool_refs:
+        if not isinstance(tool_ref, dict) or tool_ref.get("type") != "function":
+            continue
+        name = tool_ref.get("name")
+        function_ref = tool_ref.get("function")
+        if not name and isinstance(function_ref, dict):
+            name = function_ref.get("name")
+        if not isinstance(name, str) or not name:
+            raise VLLMValidationError(
+                "Each function entry in tool_choice 'allowed_tools' must "
+                "include a name.",
+                parameter="tool_choice",
+            )
+        names.add(name)
+    return names
 
 
 def custom_tool_parameters() -> dict[str, Any]:
@@ -448,7 +483,11 @@ def _get_json_schema_from_tools(
 
 def get_json_schema_from_tools(
     tool_choice: (
-        str | ToolChoiceFunction | ToolChoiceCustom | ChatCompletionNamedToolChoiceParam
+        str
+        | ToolChoiceFunction
+        | ToolChoiceCustom
+        | ToolChoiceAllowed
+        | ChatCompletionNamedToolChoiceParam
     ),
     tools: list[Tool] | None,
     parallel_tool_calls: bool | None = None,
@@ -483,6 +522,24 @@ def get_json_schema_from_tools(
         if tool_name not in chat_tool_map:
             raise ValueError(f"Tool '{tool_name}' has not been passed in `tools`.")
         return _params_or_empty_object(chat_tool_map[tool_name].function.parameters)
+    # tool_choice: allowed_tools with mode="required"
+    if isinstance(tool_choice, ToolChoiceAllowed):
+        if tool_choice.mode == "auto":
+            return None
+        allowed_names = get_allowed_function_tool_names(tool_choice)
+        assert allowed_names is not None
+        allowed_tools = [
+            tool
+            for tool in require_function_tools(tools)
+            if _extract_tool_info(tool)[0] in allowed_names
+        ]
+        if not allowed_tools:
+            raise VLLMValidationError(
+                "tool_choice 'allowed_tools' requires a function call, but "
+                "none of its function entries is present in `tools`.",
+                parameter="tool_choice",
+            )
+        return _get_json_schema_from_tools(allowed_tools, parallel_tool_calls)
     # tool_choice: "required"
     if tool_choice == "required":
         return _get_json_schema_from_tools(tools, parallel_tool_calls)

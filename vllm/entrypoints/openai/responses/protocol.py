@@ -772,6 +772,9 @@ class ResponsesRequest(OpenAIBaseModel):
         is_named_tool_choice = isinstance(tool_choice, dict) and tool_choice.get(
             "type"
         ) in ("function", "custom")
+        is_allowed_tool_choice = (
+            isinstance(tool_choice, dict) and tool_choice.get("type") == "allowed_tools"
+        )
 
         if not has_tools:
             if tool_choice in ("auto", "none"):
@@ -786,6 +789,17 @@ class ResponsesRequest(OpenAIBaseModel):
                     "Tool choice 'function' not found in 'tools' parameter.",
                     parameter="tool_choice",
                 )
+            elif is_allowed_tool_choice:
+                from vllm.tool_parsers.utils import (
+                    get_allowed_function_tool_names,
+                )
+
+                if get_allowed_function_tool_names(tool_choice):
+                    raise VLLMValidationError(
+                        "Tool choice 'allowed_tools' must be specified with "
+                        "'tools' parameter.",
+                        parameter="tool_choice",
+                    )
         elif is_named_tool_choice and tools is not None:
             tool_name = tool_choice.get("name")
             if not tool_name:
@@ -796,6 +810,13 @@ class ResponsesRequest(OpenAIBaseModel):
             resolved = _resolve_named_tool_choice(tool_name, tools)
             if resolved != tool_name:
                 data["tool_choice"] = {**tool_choice, "name": resolved}
+        elif is_allowed_tool_choice and tools is not None:
+            from vllm.tool_parsers.utils import (
+                get_allowed_function_tool_names,
+            )
+
+            for tool_name in get_allowed_function_tool_names(tool_choice) or ():
+                _resolve_named_tool_choice(tool_name, tools)
 
         return data
 

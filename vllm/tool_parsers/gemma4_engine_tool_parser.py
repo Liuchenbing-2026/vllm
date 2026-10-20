@@ -1,7 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from openai.types.responses import ToolChoiceCustom, ToolChoiceFunction
+from openai.types.responses import (
+    ToolChoiceAllowed,
+    ToolChoiceCustom,
+    ToolChoiceFunction,
+)
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedToolChoiceParam,
@@ -28,13 +32,17 @@ class Gemma4EngineToolParser(Gemma4ParserToolAdapter):  # type: ignore[valid-typ
         """
         if request.tools:
             tc = request.tool_choice
-            if tc == "required" or isinstance(
-                tc,
-                (
-                    ChatCompletionNamedToolChoiceParam,
-                    ToolChoiceFunction,
-                    ToolChoiceCustom,
-                ),
+            if (
+                tc == "required"
+                or isinstance(
+                    tc,
+                    (
+                        ChatCompletionNamedToolChoiceParam,
+                        ToolChoiceFunction,
+                        ToolChoiceCustom,
+                    ),
+                )
+                or (isinstance(tc, ToolChoiceAllowed) and tc.mode == "required")
             ):
                 request.skip_special_tokens = False
                 return request
