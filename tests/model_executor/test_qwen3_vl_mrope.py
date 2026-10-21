@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 import pytest
 import torch
+from transformers import Qwen3VLConfig
 
 from vllm.model_executor.models.qwen3_vl import Qwen3VLForConditionalGeneration
 from vllm.multimodal.inputs import (
@@ -14,6 +15,11 @@ from vllm.multimodal.inputs import (
     MultiModalKwargsItem,
     PlaceholderRange,
 )
+from vllm.multimodal.video_prune.evs import (
+    compute_mrope_for_media,
+    recompute_mrope_positions,
+)
+from vllm.utils.func_utils import supports_kw
 
 
 @pytest.fixture(autouse=True, scope="module")
@@ -235,3 +241,267 @@ def test_match_qwen3vl_mrope_evs_on(
     )
 
     assert torch.equal(actual_mrope, expected_mrope_masked)
+
+
+def _make_pruned_video_positions(empty_frame: bool):
+    config = Qwen3VLConfig(
+        vision_config={"spatial_merge_size": 1},
+        image_token_id=IMAGE_TOKEN_ID,
+        video_token_id=VIDEO_TOKEN_ID,
+        vision_start_token_id=VISION_START_TOKEN_ID,
+        vision_end_token_id=VISION_END_TOKEN_ID,
+    )
+    frame_prefix = [2] * 6 + [VISION_START_TOKEN_ID]
+    frame_suffix = [VISION_END_TOKEN_ID]
+    full_tokens = (frame_prefix + [VIDEO_TOKEN_ID] * 4 + frame_suffix) * 4
+    grid = MultiModalKwargsItem(
+        {
+            "video_grid_thw": MultiModalFieldElem(
+                data=torch.tensor([4, 2, 2]), field=None
+            )
+        }
+    )
+    feature = MultiModalFeatureSpec(
+        data=grid,
+        modality="video",
+        identifier="video",
+        mm_position=PlaceholderRange(offset=0, length=len(full_tokens)),
+    )
+    full_positions, _ = Qwen3VLForConditionalGeneration._get_mrope_input_positions(
+        input_tokens=full_tokens, mm_features=[feature], config=config
+    )
+    counts = [4, 0, 3, 3] if empty_frame else [4, 2, 2, 2]
+    mask = torch.tensor(
+        [
+            keep
+            for count in counts
+            for keep in [True] * 7 + [i < count for i in range(4)] + [True]
+        ]
+    )
+    retained_tokens = torch.tensor(full_tokens)[mask]
+    positions = torch.cat(
+        [
+            full_positions[:, mask],
+            retained_tokens.eq(VISION_START_TOKEN_ID).view(1, -1),
+            retained_tokens.eq(VIDEO_TOKEN_ID).view(1, -1),
+        ],
+        dim=0,
+    ).long()
+    placeholder = (
+        frame_prefix
+        + [VIDEO_TOKEN_ID] * sum(counts)
+        + frame_suffix
+        + (frame_prefix + frame_suffix) * 3
+    )
+    return config, grid, placeholder, positions
+
+
+@pytest.mark.parametrize("prefix_len", [3, 20])
+@pytest.mark.parametrize("outer_markers", [False, True])
+@pytest.mark.parametrize("num_videos", [1, 2])
+@pytest.mark.parametrize("empty_frame", [False, True])
+@pytest.mark.parametrize("chunked", [False, True])
+def test_pruned_video_uses_placeholder_ranges(
+    prefix_len, outer_markers, num_videos, empty_frame, chunked
+):
+    """Pruned frame metadata must stay inside its prompt placeholder.
+
+    New processors retain outer vision markers, which do not belong to the
+    video replacement. Exact ranges also preserve text, empty frames and a
+    continuation starting on the first video token.
+    """
+    config, grid, placeholder, mm_pos = _make_pruned_video_positions(empty_frame)
+    tokens = [1] * prefix_len
+    features = []
+    for index in range(num_videos):
+        if outer_markers:
+            tokens.append(VISION_START_TOKEN_ID)
+        start = len(tokens)
+        tokens += placeholder
+        features.append(
+            MultiModalFeatureSpec(
+                data=grid,
+                modality="video",
+                identifier=f"video-{index}",
+                mm_position=PlaceholderRange(offset=start, length=len(placeholder)),
+            )
+        )
+        if outer_markers:
+            tokens.append(VISION_END_TOKEN_ID)
+        tokens += [1] * 3
+
+    expected = torch.empty((3, len(tokens)), dtype=torch.long)
+    previous_end, base = 0, 0
+    for feature in features:
+        start = feature.mm_position.offset
+        expected[:, previous_end:start] = torch.arange(start - previous_end) + base
+        base += start - previous_end
+        expected[:, start : start + mm_pos.shape[1]] = mm_pos[:3] + base
+        base += int(mm_pos[:3].max()) + 1
+        previous_end = start + mm_pos.shape[1]
+    expected[:, previous_end:] = torch.arange(len(tokens) - previous_end) + base
+    actual, _ = Qwen3VLForConditionalGeneration._get_mrope_input_positions(
+        input_tokens=tokens, mm_features=features, config=config
+    )
+    if chunked:
+        split = int(mm_pos[4].nonzero()[0])
+        calls = [
+            (
+                feature.mm_position.offset + offset,
+                [mm_pos[:, lower:upper]],
+                [feature.mm_position],
+            )
+            for feature in features
+            for offset, lower, upper in [(0, 0, split), (split, split, mm_pos.shape[1])]
+        ]
+    else:
+        calls = [(0, [mm_pos] * num_videos, [f.mm_position for f in features])]
+    recompute = Qwen3VLForConditionalGeneration._recompute_mrope_positions
+    for computed, position_blocks, placeholders in calls:
+        kwargs = {}
+        if supports_kw(recompute, "multimodal_placeholders", allow_var_kwargs=False):
+            kwargs["multimodal_placeholders"] = placeholders
+        embeds = [
+            torch.cat([torch.zeros((m.shape[1], 8)), m.T.float()], dim=1)
+            for m in position_blocks
+        ]
+        _, actual, delta = recompute(
+            input_ids=torch.tensor(tokens),
+            multimodal_embeddings=embeds,
+            mrope_positions=actual,
+            num_computed_tokens=computed,
+            vision_start_token_id=VISION_START_TOKEN_ID,
+            image_token_id=IMAGE_TOKEN_ID,
+            video_token_id=VIDEO_TOKEN_ID,
+            **kwargs,
+        )
+    assert torch.equal(actual, expected)
+    assert delta == int(expected.max()) + 1 - len(tokens)
+
+
+@pytest.mark.parametrize("metadata_channels", [4, 5])
+@pytest.mark.parametrize("chunked", [False, True])
+def test_image_position_metadata_preserves_legacy_semantics(metadata_channels, chunked):
+    """The Qwen2.5 four-channel and Qwen3 five-channel image grids stay exact."""
+    tokens = torch.tensor(
+        [1, VISION_START_TOKEN_ID] + [IMAGE_TOKEN_ID] * 4 + [VISION_END_TOKEN_ID, 1]
+    )
+    mm_pos = compute_mrope_for_media(torch.tensor([1, 2, 2]), 1).T
+    if metadata_channels == 5:
+        mm_pos = torch.cat([mm_pos, torch.zeros((1, 4), dtype=torch.long)])
+    state = torch.arange(len(tokens)).repeat(3, 1)
+    expected = torch.tensor(
+        [[0, 1, 2, 2, 2, 2, 4, 5], [0, 1, 2, 2, 3, 3, 4, 5], [0, 1, 2, 3, 2, 3, 4, 5]]
+    )
+    parts = [(0, 0, 2), (4, 2, 4)] if chunked else [(0, 0, 4)]
+    for computed, lower, upper in parts:
+        state, delta = recompute_mrope_positions(
+            tokens,
+            [mm_pos[:, lower:upper]],
+            state,
+            computed,
+            VISION_START_TOKEN_ID,
+            IMAGE_TOKEN_ID,
+            VIDEO_TOKEN_ID,
+            [PlaceholderRange(offset=2, length=4)],
+        )
+    assert torch.equal(state, expected)
+    assert delta == -2
+    if not chunked:
+        legacy, legacy_delta = recompute_mrope_positions(
+            tokens,
+            [mm_pos],
+            torch.arange(len(tokens)).repeat(3, 1),
+            0,
+            VISION_START_TOKEN_ID,
+            IMAGE_TOKEN_ID,
+            VIDEO_TOKEN_ID,
+        )
+        assert torch.equal(legacy, state)
+        assert legacy_delta == delta
+
+
+@pytest.mark.parametrize("metadata_channels", [4, 5])
+def test_empty_position_metadata_preserves_prompt(metadata_channels):
+    initial = torch.arange(8).repeat(3, 1)
+    state, delta = recompute_mrope_positions(
+        torch.ones(8, dtype=torch.long),
+        [torch.empty((metadata_channels, 0), dtype=torch.long)],
+        initial,
+        0,
+        VISION_START_TOKEN_ID,
+        IMAGE_TOKEN_ID,
+        VIDEO_TOKEN_ID,
+        [PlaceholderRange(offset=2, length=4)],
+    )
+    assert torch.equal(state, initial)
+    assert delta == 0
+
+
+@pytest.mark.parametrize("chunked", [False, True])
+def test_cohere_image_positions_accept_placeholder_ranges(chunked):
+    from vllm.model_executor.models.cohere_compass import (
+        CohereCompassForConditionalGeneration,
+    )
+
+    tokens = (
+        [1, VISION_START_TOKEN_ID] + [IMAGE_TOKEN_ID] * 4 + [VISION_END_TOKEN_ID, 1]
+    )
+    mm_pos = compute_mrope_for_media(torch.tensor([1, 2, 2]), 1).T
+    mm_pos = torch.cat([mm_pos, torch.zeros((1, 4), dtype=torch.long)])
+    hidden = torch.arange(32).reshape(4, 8).float()
+    state = torch.arange(len(tokens)).repeat(3, 1)
+    parts = [(0, 0, 2), (4, 2, 4)] if chunked else [(0, 0, 4)]
+    for computed, lower, upper in parts:
+        embed = torch.cat(
+            [hidden[lower:upper], mm_pos[:, lower:upper].T.float()], dim=1
+        )
+        cleaned, state, delta = (
+            CohereCompassForConditionalGeneration._recompute_mrope_positions(
+                input_ids=tokens,
+                multimodal_embeddings=[embed],
+                mrope_positions=state,
+                num_computed_tokens=computed,
+                vision_start_token_id=VISION_START_TOKEN_ID,
+                image_token_id=IMAGE_TOKEN_ID,
+                video_token_id=VIDEO_TOKEN_ID,
+                multimodal_placeholders=[PlaceholderRange(offset=2, length=4)],
+            )
+        )
+        assert torch.equal(cleaned[0], hidden[lower:upper])
+    expected = torch.tensor(
+        [[0, 1, 2, 2, 2, 2, 4, 5], [0, 1, 2, 2, 3, 3, 4, 5], [0, 1, 2, 3, 2, 3, 4, 5]]
+    )
+    assert torch.equal(state, expected)
+    assert delta == -2
+
+
+def test_video_lookahead_slice_preserves_target_positions():
+    """A drafter's shifted gather uses its actual slice, not the target cursor."""
+    _, _, placeholder, mm_pos = _make_pruned_video_positions(False)
+    tokens = [1, 1, 1, VISION_START_TOKEN_ID] + placeholder + [VISION_END_TOKEN_ID, 1]
+    start = 4
+    state = torch.empty((3, len(tokens)), dtype=torch.long)
+    state[:, :start] = torch.arange(start)
+    state[:, start : start + mm_pos.shape[1]] = mm_pos[:3] + start
+    tail = start + mm_pos.shape[1]
+    state[:, tail:] = (
+        torch.arange(len(tokens) - tail) + int(mm_pos[:3].max()) + start + 1
+    )
+    _, actual, _ = Qwen3VLForConditionalGeneration._recompute_mrope_positions(
+        input_ids=torch.tensor(tokens),
+        multimodal_embeddings=[
+            torch.cat(
+                [torch.zeros((mm_pos.shape[1] - 1, 8)), mm_pos[:, 1:].T.float()], dim=1
+            )
+        ],
+        mrope_positions=state,
+        num_computed_tokens=start + 1,
+        vision_start_token_id=VISION_START_TOKEN_ID,
+        image_token_id=IMAGE_TOKEN_ID,
+        video_token_id=VIDEO_TOKEN_ID,
+        multimodal_placeholders=[
+            PlaceholderRange(offset=start, length=len(placeholder))
+        ],
+    )
+    assert torch.equal(actual, state)

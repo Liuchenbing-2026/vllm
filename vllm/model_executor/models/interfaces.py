@@ -58,7 +58,11 @@ if TYPE_CHECKING:
     )
     from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
     from vllm.model_executor.models.utils import WeightsMapper
-    from vllm.multimodal.inputs import MultiModalFeatureSpec, MultiModalKwargsItem
+    from vllm.multimodal.inputs import (
+        MultiModalFeatureSpec,
+        MultiModalKwargsItem,
+        PlaceholderRange,
+    )
     from vllm.multimodal.registry import _ProcessorFactories
     from vllm.sequence import IntermediateTensors
     from vllm.tasks import ScoreType
@@ -545,6 +549,7 @@ class SupportsMultiModalPruning(Protocol):
         multimodal_embeddings: Sequence[torch.Tensor],
         mrope_positions: torch.LongTensor,
         num_computed_tokens: int,
+        multimodal_placeholders: Sequence["PlaceholderRange"] | None = None,
     ) -> tuple[Sequence[torch.Tensor], Tensor, int]:
         """Update part of input mrope positions (starting with
         num_computed_tokens index). Original mrope_positions are computed
@@ -561,6 +566,8 @@ class SupportsMultiModalPruning(Protocol):
             mrope_positions: Existing mrope positions (3, N) for entire
                 sequence
             num_computed_tokens: A number of computed tokens so far.
+            multimodal_placeholders: Original prompt ranges in embedding order.
+                Partial embeddings retain their full placeholder range.
 
         Returns:
             Tuple of (multimodal_embeddings, mrope_positions,

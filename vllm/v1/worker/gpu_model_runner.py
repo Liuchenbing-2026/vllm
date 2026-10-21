@@ -110,6 +110,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
 from vllm.tracing import instrument
 from vllm.utils import length_from_prompt_token_ids_or_embeds
+from vllm.utils.func_utils import supports_kw
 from vllm.utils.gc_utils import freeze_gc_for_cudagraph_capture
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import cdiv
@@ -3013,6 +3014,7 @@ class GPUModelRunner(
 
         for req_id in self.input_batch.req_ids:
             mm_embeds_req: list[torch.Tensor] = []
+            mm_placeholders_req = []
 
             num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
             req_state = self.requests[req_id]
@@ -3075,17 +3077,26 @@ class GPUModelRunner(
                     ] |= is_embed
                 set_mm_embedding_modality(mm_embeds_item, mm_feature.modality)
                 mm_embeds_req.append(mm_embeds_item)
+                mm_placeholders_req.append(pos_info)
 
             if self.is_multimodal_pruning_enabled and self.uses_mrope:
                 assert req_state.mrope_positions is not None
                 should_sync_mrope_positions = True
                 old_mm_embeds_req = mm_embeds_req
+                pruning_kwargs: dict[str, Any] = {}
+                if supports_kw(
+                    self.model.recompute_mrope_positions,
+                    "multimodal_placeholders",
+                    allow_var_kwargs=False,
+                ):
+                    pruning_kwargs["multimodal_placeholders"] = mm_placeholders_req
                 mm_embeds_req, new_mrope_positions, new_delta = (
                     self.model.recompute_mrope_positions(
                         input_ids=req_state.prompt_token_ids,
                         multimodal_embeddings=mm_embeds_req,
                         mrope_positions=req_state.mrope_positions,
-                        num_computed_tokens=req_state.num_computed_tokens,
+                        num_computed_tokens=num_computed_tokens,
+                        **pruning_kwargs,
                     )
                 )
                 mm_embeds_req = [

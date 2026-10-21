@@ -1,14 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from typing import Any
+
 import torch
 import torch.nn as nn
 
 from vllm.config import ModelConfig
 from vllm.model_executor.models.interfaces import supports_multimodal_pruning
+from vllm.multimodal.inputs import PlaceholderRange
 from vllm.multimodal.utils import (
     copy_mm_embedding_modality,
     get_mm_features_in_window,
 )
+from vllm.utils.func_utils import supports_kw
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.rope import RopeState
@@ -70,7 +74,10 @@ class MultiModalPruner:
         for batch_idx, req_id in enumerate(input_batch.req_ids):
             num_computed = num_computed_list[batch_idx]
             query_end = num_computed + num_scheduled_list[batch_idx]
-            num_req_embeds = self._num_window_embeds(req_id, num_computed, query_end)
+            placeholders = self._get_window_placeholders(
+                req_id, num_computed, query_end
+            )
+            num_req_embeds = len(placeholders)
             if num_req_embeds == 0:
                 continue
             req_embeds = mm_embeds[pos : pos + num_req_embeds]
@@ -82,11 +89,19 @@ class MultiModalPruner:
             mrope_positions = self.rope_state.read_prefill_positions(
                 req_idx, prefill_len
             ).long()
+            pruning_kwargs: dict[str, Any] = {}
+            if supports_kw(
+                self.model.recompute_mrope_positions,
+                "multimodal_placeholders",
+                allow_var_kwargs=False,
+            ):
+                pruning_kwargs["multimodal_placeholders"] = placeholders
             req_cleaned, new_positions, delta = self.model.recompute_mrope_positions(
                 input_ids=input_ids,
                 multimodal_embeddings=req_embeds,
                 mrope_positions=mrope_positions,
                 num_computed_tokens=num_computed,
+                **pruning_kwargs,
             )
             self.rope_state.update_prefill_positions(req_idx, new_positions, delta)
             cleaned.extend(
@@ -97,8 +112,10 @@ class MultiModalPruner:
         assert pos == len(mm_embeds)
         return cleaned
 
-    def _num_window_embeds(self, req_id: str, query_start: int, query_end: int) -> int:
-        """Count the media items contributing embeddings to [query_start,
+    def _get_window_placeholders(
+        self, req_id: str, query_start: int, query_end: int
+    ) -> list[PlaceholderRange]:
+        """Select the media items contributing embeddings to [query_start,
         query_end), mirroring EncoderRunner.gather_mm_embeddings' per-request
         windowing so the flat mm_embeds list can be re-segmented per request.
 
@@ -110,7 +127,7 @@ class MultiModalPruner:
         lo, hi = get_mm_features_in_window(
             mm_features, start=query_start, end=query_end
         )
-        count = 0
+        placeholders = []
         for mm_feature in mm_features[lo:hi]:
             pos_info = mm_feature.mm_position
             start_idx = max(query_start - pos_info.offset, 0)
@@ -119,8 +136,8 @@ class MultiModalPruner:
                 start_idx, end_idx
             )
             if embeds_start != embeds_end:
-                count += 1
-        return count
+                placeholders.append(pos_info)
+        return placeholders
 
 
 def maybe_create_mm_pruner(

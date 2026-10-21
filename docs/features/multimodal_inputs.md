@@ -364,6 +364,10 @@ video, and `--video-pruning-method` to choose the training-free algorithm:
   video-level and frame-level feature centers and gives distinctive frames a
   larger share of the budget. At least one token per frame is retained.
 
+For Qwen3-VL, pruning preserves frame timestamps and vision boundary tokens.
+Both processor layouts, with and without outer vision markers around the video,
+retain the original media positions across prefill chunks and multiple videos.
+
 ```bash
 vllm serve Qwen/Qwen3-VL-8B-Instruct \
     --video-pruning-rate 0.75 --video-pruning-method vidcom2

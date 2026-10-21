@@ -9,8 +9,12 @@
 # license agreement from NVIDIA CORPORATION is strictly prohibited.
 
 import typing
+from collections.abc import Sequence
 
 import torch
+
+if typing.TYPE_CHECKING:
+    from vllm.multimodal.inputs import PlaceholderRange
 
 
 def compute_retained_tokens_count(
@@ -159,6 +163,7 @@ def recompute_mrope_positions(
     vision_start_token_id: int,
     image_token_id: int,
     video_token_id: int,
+    multimodal_placeholders: Sequence["PlaceholderRange"] | None = None,
 ) -> tuple[torch.LongTensor, int]:
     """Update part of input mrope positions.
     Original mrope_positions are computed incorrectly, so once we prune media
@@ -200,11 +205,28 @@ def recompute_mrope_positions(
         vision_start_token_id: Token indicating start of vision media.
         image_token_id: Image token id
         video_token_id: Video token id
+        multimodal_placeholders: Original prompt ranges in embedding order.
+            Dense ranges disambiguate outer markers and partial media slices.
+            Sparse or absent ranges retain the legacy marker lookup.
 
     Returns:
         Tuple of (mrope_positions, mrope_position_delta).
 
     """
+    if multimodal_placeholders is not None:
+        if len(multimodal_placeholders) != len(multimodal_positions):
+            raise ValueError("Each multimodal position block needs a placeholder")
+        if all(p.get_num_embeds() == p.length for p in multimodal_placeholders):
+            return _recompute_mrope_with_placeholders(
+                input_ids,
+                multimodal_positions,
+                mrope_positions,
+                num_computed_tokens,
+                image_token_id,
+                video_token_id,
+                multimodal_placeholders,
+            )
+
     # Tensors
     positions: torch.LongTensor = typing.cast(
         torch.LongTensor, mrope_positions.clone()
@@ -353,3 +375,35 @@ def recompute_mrope_positions(
 
     mrope_positions_delta = (positions.max() + 1 - N).item()
     return positions, mrope_positions_delta
+
+
+def _recompute_mrope_with_placeholders(
+    input_ids: torch.LongTensor,
+    multimodal_positions: list[torch.Tensor],
+    mrope_positions: torch.LongTensor,
+    num_computed_tokens: int,
+    image_token_id: int,
+    video_token_id: int,
+    multimodal_placeholders: Sequence["PlaceholderRange"],
+) -> tuple[torch.LongTensor, int]:
+    """Place each embedding slice using its original prompt range."""
+    positions = typing.cast(torch.LongTensor, mrope_positions.clone())
+    n = input_ids.numel()
+    text_mask = ~(input_ids.eq(image_token_id) | input_ids.eq(video_token_id))
+    for mm_pos, placeholder in zip(multimodal_positions, multimodal_placeholders):
+        if mm_pos.shape[1] == 0:
+            continue
+        start = max(num_computed_tokens, placeholder.offset)
+        end = start + mm_pos.shape[1]
+        if start < 0 or end > min(placeholder.offset + placeholder.length, n):
+            raise ValueError("Multimodal position slice exceeds its placeholder")
+        base = positions[-1, placeholder.offset - 1] + 1 if placeholder.offset else 0
+        positions[:, start:end] = mm_pos[:3] + base
+        if mm_pos.shape[0] == 5:
+            offset = mm_pos[:3].max() + base + 1
+        else:
+            offset = mm_pos[3, 0] + base
+        positions[:, end:] = torch.cumsum(text_mask[end:].long(), dim=0) + offset - 1
+
+    delta = int((positions.max().item() + 1) - n) if positions.numel() else -n
+    return positions, delta
