@@ -8,6 +8,10 @@ from typing import Literal
 import torch
 
 from vllm.config import VllmConfig
+from vllm.model_executor.layers.mamba.verify_extension import (
+    LinearAttnVerifyExtension,
+    create_linear_attn_verify_extension,
+)
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -77,6 +81,7 @@ class GDNAttentionMetadata:
     nums_dict: dict | None = None
     batch_ptr: torch.Tensor | None = None
     token_chunk_offset_ptr: torch.Tensor | None = None
+    verify_extension: LinearAttnVerifyExtension | None = None
 
 
 class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]):
@@ -109,6 +114,11 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             self.num_spec = 0
         self.use_spec_decode: bool = self.num_spec > 0
         self._init_reorder_batch_threshold(1, self.use_spec_decode)
+        self.verify_extension = (
+            create_linear_attn_verify_extension(vllm_config)
+            if self.use_spec_decode
+            else None
+        )
 
         self.use_full_cuda_graph: bool = (
             self.compilation_config.cudagraph_mode.has_full_cudagraphs()
@@ -518,6 +528,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             nums_dict=nums_dict,
             batch_ptr=batch_ptr,
             token_chunk_offset_ptr=token_chunk_offset_ptr,
+            verify_extension=self.verify_extension,
         )
         return attn_metadata
 

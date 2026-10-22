@@ -8,6 +8,9 @@ from vllm.config import VllmConfig
 def init_speculator(vllm_config: VllmConfig, device: torch.device):
     speculative_config = vllm_config.speculative_config
     assert speculative_config is not None
+    registered = speculative_config.registered_method()
+    if registered is not None:
+        return registered.resolve_speculator_cls()(vllm_config, device)
     if speculative_config.method == "extract_hidden_states":
         from vllm.v1.worker.gpu.spec_decode.extract_hidden_states import (
             ExtractHiddenStatesSpeculator,

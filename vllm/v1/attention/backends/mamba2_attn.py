@@ -7,6 +7,10 @@ from typing import Any
 import torch
 
 from vllm.config import VllmConfig
+from vllm.model_executor.layers.mamba.verify_extension import (
+    LinearAttnVerifyExtension,
+    create_linear_attn_verify_extension,
+)
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -109,6 +113,7 @@ class Mamba2AttentionMetadata(BaseMambaAttentionMetadata):
 
     # Chunk-related metadata (only for prefill)
     seq_idx_p: torch.Tensor | None = None
+    verify_extension: LinearAttnVerifyExtension | None = None
 
 
 class Mamba2AttentionMetadataBuilder(
@@ -129,6 +134,19 @@ class Mamba2AttentionMetadataBuilder(
             "chunk_size needs to be set in the model config for Mamba2 models"
         )
         self.chunk_size: int = chunk_size
+        self.verify_extension = (
+            create_linear_attn_verify_extension(vllm_config)
+            if self.use_spec_decode
+            else None
+        )
+        if self.verify_extension is not None and (
+            vllm_config.cache_config.use_replayssm
+            or vllm_config.cache_config.mamba_cache_mode != "none"
+        ):
+            raise ValueError(
+                "Non-chain Mamba2 verification requires per-row states and "
+                "mamba_cache_mode=none; ReplaySSM and prefix caching are unsupported."
+            )
 
     def build(
         self,
@@ -173,6 +191,7 @@ class Mamba2AttentionMetadataBuilder(
             common,
             prep_initial_states=prep_initial_states,
             chunk_size=self.chunk_size,
+            verify_extension=self.verify_extension,
             seq_idx_p=seq_idx_p,
             cu_chunk_seqlen_p=cu_chunk_seqlen_p,
             last_chunk_indices_p=last_chunk_indices_p,

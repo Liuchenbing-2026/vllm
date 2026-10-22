@@ -227,15 +227,26 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         skip_attn_for_dummy_run: bool = False,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
         is_profile: bool = False,
+        num_speculative_tokens: int | None = None,
     ) -> torch.Tensor:
+        # Tree proposers only need the first candidate from the AR loop. Keep
+        # other widths out until rc2 graph capture supports width specialization.
+        steps = (
+            self.num_speculative_steps
+            if num_speculative_tokens is None
+            else num_speculative_tokens
+        )
+        if steps not in (1, self.num_speculative_steps):
+            raise ValueError(
+                "rc2 supports draft prefill only (1 token) or the configured "
+                f"draft width ({self.num_speculative_steps}); got {steps}."
+            )
         num_tokens = input_batch.num_tokens
         num_tokens_padded = input_batch.num_tokens_after_padding
         num_reqs = input_batch.num_reqs
         max_query_len = input_batch.num_scheduled_tokens.max()
         max_seq_len = input_batch.seq_lens_cpu_upper_bound[:num_reqs].max().item()
-        self.draft_max_seq_len = min(
-            max_seq_len + self.num_speculative_steps, self.max_model_len
-        )
+        self.draft_max_seq_len = min(max_seq_len + steps, self.max_model_len)
 
         # NOTE(woosuk): To avoid CPU-GPU synchronization without CPU knowing the
         # number of rejected tokens, we maintain the size of input_ids and
@@ -244,7 +255,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         # we can also reuse the attention metadata (e.g., query_start_loc,
         # seq_lens) of the target model.
         if aux_hidden_states:
-            assert self.method == "eagle3"
+            assert hasattr(self.model, "combine_hidden_states")
             hidden_states = self.model.combine_hidden_states(
                 torch.cat(aux_hidden_states, dim=-1)
             )
@@ -329,8 +340,8 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             )
         self.on_prefill_end(num_reqs)
 
-        if self.num_speculative_steps == 1:
-            # Early exit.
+        if steps == 1:
+            # Early exit after draft prefill, including tree candidate seeding.
             return self.draft_tokens[:num_reqs, :1]
 
         if self.pcp_manager is not None and not dummy_run:

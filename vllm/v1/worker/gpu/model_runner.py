@@ -156,6 +156,7 @@ from vllm.v1.worker.gpu.spec_decode.adaptive_verification import (
     resolve_adaptive_cudagraph_mode,
 )
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
+    requires_aux_hidden_states,
     set_eagle3_aux_hidden_state_layers,
     verify_supports_aux_hidden_states_over_pp,
 )
@@ -272,18 +273,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Speculative decoding.
         self.speculator = None
+        self.speculator_hooks: frozenset[str] = frozenset()
         self.use_aux_hidden_state_outputs = False
         self.num_speculative_steps = vllm_config.num_speculative_tokens
         if self.speculative_config is not None:
             if self.is_last_pp_rank:
                 self.speculator = init_speculator(self.vllm_config, self.device)
+                self.speculator_hooks = self.speculator.overridden_hooks()
 
-            if self.speculative_config.method in (
-                "eagle3",
-                "dflash",
-                "dspark",
-                "extract_hidden_states",
-            ):
+            if requires_aux_hidden_states(self.speculative_config):
                 # Drafting may require auxiliary hidden states from target model outputs
                 self.use_aux_hidden_state_outputs = True
 
@@ -491,14 +489,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.vllm_config._check_watermarking_unsupported(custom_sampler=True)
                 self.sampler, self.rejection_sampler = custom
             elif self.speculative_config is not None:
-                self.rejection_sampler = RejectionSampler(
-                    self.sampler,
-                    self.speculative_config,
-                    self.device,
-                    watermark_key=speculative_target_watermark_key(
-                        self.vllm_config.watermark_config
-                    ),
-                )
+                self.rejection_sampler = self._build_rejection_sampler()
             self.prompt_logprobs_worker = PromptLogprobsWorker(
                 self.max_num_reqs,
                 logprobs_mode=self.model_config.logprobs_mode,
@@ -532,6 +523,23 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
 
         get_offloader().post_init()
+
+    def _build_rejection_sampler(self) -> RejectionSampler:
+        assert self.sampler is not None
+        assert self.speculative_config is not None
+        if self.speculator is not None:
+            custom = self.speculator.make_rejection_sampler(self.sampler)
+            if custom is not None:
+                self.vllm_config._check_watermarking_unsupported(custom_sampler=True)
+                return custom
+        return RejectionSampler(
+            self.sampler,
+            self.speculative_config,
+            self.device,
+            watermark_key=speculative_target_watermark_key(
+                self.vllm_config.watermark_config
+            ),
+        )
 
     def get_model(self) -> nn.Module:
         return self.model
@@ -1861,6 +1869,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # values above.
             **self.model_state.prepare_inputs(input_batch, self.req_states),
         }
+        if "prepare_verify_inputs" in self.speculator_hooks and not (
+            dummy_run and skip_attn_for_dummy_run
+        ):
+            assert self.speculator is not None
+            if batch_desc.num_ubatches > 1:
+                raise ValueError("Custom verification does not support microbatching.")
+            self.speculator.prepare_verify_inputs(
+                input_batch, model_inputs, dummy_run=dummy_run
+            )
         if not self.is_first_pp_rank:
             # Update for non-first PP ranks.
             model_inputs["input_ids"] = None
@@ -2048,6 +2065,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         sampler_output, num_sampled, num_rejected = self.sample(
             hidden_states, input_batch, grammar_output
         )
+        if "post_accept" in self.speculator_hooks:
+            assert self.speculator is not None
+            self.speculator.post_accept(
+                input_batch, sampler_output, num_sampled, num_rejected
+            )
 
         if self.pp_handler is not None:
             # Broadcast to non-last PP ranks (handles spec decode multi-token).

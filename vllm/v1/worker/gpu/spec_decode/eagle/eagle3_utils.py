@@ -12,6 +12,18 @@ from vllm.model_executor.models.interfaces import SupportsEagle3, supports_eagle
 logger = init_logger(__name__)
 
 
+def requires_aux_hidden_states(spec_config: SpeculativeConfig | None) -> bool:
+    if spec_config is None:
+        return False
+    registered = spec_config.registered_method()
+    return spec_config.method in (
+        "eagle3",
+        "dflash",
+        "dspark",
+        "extract_hidden_states",
+    ) or (registered is not None and registered.uses_aux_hidden_states)
+
+
 def set_eagle3_aux_hidden_state_layers(
     model: nn.Module,
     spec_config: SpeculativeConfig,

@@ -14,12 +14,17 @@ from vllm.config.cache import CacheDType
 from vllm.config.kernel import MoEBackend
 from vllm.config.model import HfOverrides, ModelConfig
 from vllm.config.parallel import ParallelConfig
-from vllm.config.utils import config
+from vllm.config.utils import config, normalize_value
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import get_hf_text_config
 from vllm.utils.hashing import safe_hash
 from vllm.utils.import_utils import LazyLoader, has_arctic_inference
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
+from vllm.v1.spec_decode.registry import (
+    SpeculativeMethodSpec,
+    get_speculative_method,
+    registered_speculative_methods,
+)
 
 if TYPE_CHECKING:
     from transformers import PretrainedConfig
@@ -384,14 +389,19 @@ class SpeculativeConfig:
     model: str | None = None
     """The name of the draft model, eagle head, or additional weights, if
     provided."""
-    method: SpeculativeMethod | None = None
+    method: SpeculativeMethod | str | None = None
     """The name of the speculative method to use. If users provide and set the
     `model` param, the speculative method type will be detected automatically
     if possible, if `model` param is not provided, the method name must be
     provided.
 
     If using `ngram` method, the related configuration `prompt_lookup_max` and
-    `prompt_lookup_min` should be considered."""
+    `prompt_lookup_min` should be considered.
+
+    Plugin-registered names are supported by Model Runner V2."""
+    method_config: dict[str, Any] = Field(default_factory=dict)
+    """Options consumed by a registered method's configure hook and speculator.
+    Built-in methods ignore this field."""
     draft_tensor_parallel_size: int | None = Field(default=None, ge=1)
     """The degree of the tensor parallelism for the draft model. Can only be 1
     or the same as the target model's tensor parallel size."""
@@ -612,13 +622,16 @@ class SpeculativeConfig:
         factors: list[Any] = []
         # Eagle3 and extract_hidden_states affect the computation graph because
         # they return intermediate hidden states in addition to the final hidden state.
+        registered = self.registered_method()
         uses_aux_hidden_states = self.method in (
             "eagle3",
             "extract_hidden_states",
             "dflash",
             "dspark",
-        )
+        ) or (registered is not None and registered.uses_aux_hidden_states)
         factors.append(uses_aux_hidden_states)
+        if registered is not None:
+            factors.append((self.method, normalize_value(self.method_config)))
 
         if self.draft_model_config is not None:
             factors.append(self.draft_model_config.compute_hash())
@@ -1164,7 +1177,7 @@ class SpeculativeConfig:
                         "method='custom_class' requires 'model' to contain the "
                         "custom proposer module path (e.g., 'my_module.MyProposer')."
                     )
-            else:
+            elif self.registered_method() is None:
                 raise ValueError(
                     "num_speculative_tokens was provided but without speculative model."
                 )
@@ -1304,7 +1317,10 @@ class SpeculativeConfig:
                         draft_hf.truncated_vocab_size = target_vocab
 
                 # Automatically detect the method
-                if self.method in ("eagle", "eagle3", "dflash", "dspark"):
+                if (
+                    self.method in ("eagle", "eagle3", "dflash", "dspark")
+                    or self.registered_method() is not None
+                ):
                     pass
                 # examples:
                 # yuhuili/EAGLE-LLaMA3-Instruct-8B
@@ -1485,7 +1501,10 @@ class SpeculativeConfig:
                             f" must be divisible by {n_predict=}"
                         )
 
-                if self.num_speculative_tokens is None:
+                registered = self.registered_method()
+                if self.num_speculative_tokens is None and (
+                    registered is None or registered.configure is None
+                ):
                     raise ValueError(
                         "A speculative model was provided, but "
                         "`num_speculative_tokens` was not provided"
@@ -1571,6 +1590,10 @@ class SpeculativeConfig:
                 "the draft logits, which use_local_argmax_reduction never "
                 "materializes. Disable one of them."
             )
+
+        registered = self.registered_method()
+        if registered is not None and registered.configure is not None:
+            registered.configure(self)
 
         return self
 
@@ -1764,6 +1787,19 @@ class SpeculativeConfig:
 
         return draft_parallel_config
 
+    @field_validator("method", mode="after")
+    @classmethod
+    def _validate_method_name(cls, value: str | None) -> str | None:
+        if value is None or value in get_args(SpeculativeMethod):
+            return value
+        if get_speculative_method(value) is not None:
+            return value
+        raise ValueError(
+            f"Unknown speculative method '{value}'. Built-in methods: "
+            f"{list(get_args(SpeculativeMethod))}; registered by plugins: "
+            f"{registered_speculative_methods()}."
+        )
+
     @field_validator("attention_backend", mode="before")
     @classmethod
     def _parse_attention_backend(cls, value: Any) -> Any:
@@ -1906,11 +1942,17 @@ class SpeculativeConfig:
             == "step3p5_mtp"
         )
 
+    def registered_method(self) -> SpeculativeMethodSpec | None:
+        return get_speculative_method(self.method)
+
     def use_eagle(self) -> bool:
         # NOTE: This method is usually a stand-in for "speculative decoding using
         # target model hidden states"
         # TODO(ben): Refactor this so the naming is clearer
-        return self.method in ("eagle", "eagle3", "mtp", "dflash", "dspark")
+        if self.method in ("eagle", "eagle3", "mtp", "dflash", "dspark"):
+            return True
+        registered = self.registered_method()
+        return registered is not None and registered.uses_target_hidden_states
 
     def use_eagle_block_drop(self) -> bool:
         """Whether volatile trailing cache blocks should be discarded."""
@@ -1960,6 +2002,7 @@ class SpeculativeConfig:
                 "extract_hidden_states",
                 "custom_class",
             )
+            or self.draft_model_config is None
             else self.draft_model_config.model
         )
         num_spec_tokens = self.num_speculative_tokens
