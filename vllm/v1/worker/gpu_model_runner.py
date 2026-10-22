@@ -201,6 +201,7 @@ from vllm.v1.worker.cp_utils import (
 )
 from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 from vllm.v1.worker.ec_connector_model_runner_mixin import ECConnectorModelRunnerMixin
+from vllm.v1.worker.gpu.attn_utils import compute_mm_prefix_ranges
 from vllm.v1.worker.gpu.eplb_utils import (
     draft_model_supports_eplb,
     eplb_draft_model_name,
@@ -2329,7 +2330,16 @@ class GPUModelRunner(
         # opt out of the skip so the bidirectional range survives for images
         # larger than the window; the kernel then bounds it per-query.
         req_doc_ranges: dict[int, list[tuple[int, int]]] | None = None
-        if self.is_mm_prefix_lm:
+        if self.is_mm_prefix_lm and self.model_config.is_full_prefix_lm:
+            req_doc_ranges = compute_mm_prefix_ranges(
+                self.input_batch.req_ids,
+                {},
+                prompt_lens=[
+                    self.requests[req_id].num_prompt_tokens
+                    for req_id in self.input_batch.req_ids
+                ],
+            )
+        elif self.is_mm_prefix_lm:
             req_doc_ranges = {}
             hf_text_config = self.model_config.hf_text_config
             _bidi_sw = getattr(hf_text_config, "sliding_window", None)

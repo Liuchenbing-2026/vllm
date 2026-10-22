@@ -960,6 +960,8 @@ class VllmConfig:
                     MODEL_FOR_CAUSAL_LM_MAPPING_NAMES[hf_config.model_type]
                 ]
 
+        # Preserve the outer model's prefix semantics in nested language models.
+        _ = self.model_config.is_full_prefix_lm
         model_config = copy.deepcopy(self.model_config)
 
         # In Transformers v5, tie_word_embeddings belongs to the config of the class
@@ -1499,6 +1501,40 @@ class VllmConfig:
             return
 
         self._resolve_mm_encoder_only()
+
+        if (
+            self.model_config is not None
+            and self.model_config.is_full_prefix_lm
+            and not self.is_mm_encoder_only
+        ):
+            if self.scheduler_config.enable_chunked_prefill:
+                raise ValueError(
+                    "PaliGemma requires complete-prompt prefill. "
+                    "Disable chunked prefill with --no-enable-chunked-prefill."
+                )
+            if (
+                self.scheduler_config.long_prefill_token_threshold
+                or self.scheduler_config.long_prefill_token_threshold_adaptive
+            ):
+                raise ValueError(
+                    "PaliGemma requires long_prefill_token_threshold=0 and "
+                    "long_prefill_token_threshold_adaptive=False to keep its "
+                    "bidirectional prompt complete."
+                )
+            if (
+                self.scheduler_config.max_num_scheduled_tokens is not None
+                and self.scheduler_config.max_num_scheduled_tokens
+                < self.model_config.max_model_len
+            ):
+                raise ValueError(
+                    "PaliGemma requires max_num_scheduled_tokens to cover "
+                    "max_model_len so its prompt can be scheduled atomically."
+                )
+            if self.cache_config.enable_prefix_caching:
+                raise ValueError(
+                    "PaliGemma prefix KV depends on the complete prompt. "
+                    "Disable prefix caching with --no-enable-prefix-caching."
+                )
 
         if self.is_mm_encoder_only and self.cache_config.enable_prefix_caching:
             # Such an instance publishes encoder embeddings and runs no language
@@ -2195,6 +2231,16 @@ class VllmConfig:
         # Resolve kv_offloading-derived connector name into kv_transfer_config
         # before the HMA check below, which inspects the connector class.
         self._post_init_kv_transfer_config()
+        if (
+            self.model_config is not None
+            and self.model_config.is_full_prefix_lm
+            and not self.is_mm_encoder_only
+            and self.kv_transfer_config is not None
+        ):
+            raise ValueError(
+                "PaliGemma does not support KV transfer or offloading: "
+                "prefix KV depends on the complete prompt."
+            )
         self._verify_aux_output_compatibility()
 
         # Hybrid KV cache manager (HMA) runtime rules:

@@ -587,12 +587,21 @@ def compute_mm_prefix_ranges(
     req_ids: list[str],
     mm_features: dict[str, list[MultiModalFeatureSpec]],
     sliding_window: int | None = None,
+    *,
+    prompt_lens: Sequence[int] | None = None,
 ) -> dict[int, list[tuple[int, int]]]:
     """Compute PrefixLM bidirectional ranges for multimodal tokens.
 
-    Ranges exceeding sliding_window are skipped to prevent early tokens
-    from attending across the entire image span.
+    Without prompt_lens, ranges exceeding sliding_window are skipped. Full
+    prompt ranges require per-layer window clamping in the attention backend.
     """
+    if prompt_lens is not None:
+        return {
+            req_idx: [(0, int(length) - 1)] if length > 0 else []
+            for req_idx, (_, length) in enumerate(
+                zip(req_ids, prompt_lens, strict=True)
+            )
+        }
     req_doc_ranges: dict[int, list[tuple[int, int]]] = {}
     for req_idx, req_id in enumerate(req_ids):
         image_doc_ranges = []

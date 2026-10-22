@@ -209,6 +209,12 @@ class DefaultModelState(ModelState):
                 req_ids=input_batch.req_ids,
                 mm_features=self.encoder_cache.mm_features,
                 sliding_window=self.model_config.get_sliding_window(),
+                prompt_lens=(
+                    input_batch.prompt_lens.tolist()
+                    if self.model_config.is_full_prefix_lm
+                    and input_batch.prompt_lens is not None
+                    else None
+                ),
             )
         attn_metadata = build_attn_metadata(
             attn_groups=attn_groups,

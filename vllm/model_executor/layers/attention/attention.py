@@ -454,7 +454,9 @@ class Attention(nn.Module, AttentionLayerBase):
         self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
         # Gemma4: clamp mm_prefix bidirectional ranges by the sliding window
         # (read by the Triton backend impl). Default False for all other models.
-        self.mm_prefix_clamp_sliding_window = mm_prefix_clamp_sliding_window
+        self.mm_prefix_clamp_sliding_window = mm_prefix_clamp_sliding_window or (
+            model_config is not None and model_config.is_full_prefix_lm
+        )
 
         # use a placeholder kv cache tensor during init, which will be replaced
         # by bind_kv_cache

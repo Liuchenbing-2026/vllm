@@ -664,6 +664,17 @@ Some models are supported only via the [Transformers modeling backend](#transfor
     `--speculative-config '{"method":"mtp","num_speculative_tokens":1}'`.
 
 !!! note
+    `PaliGemmaForConditionalGeneration` uses bidirectional attention over the entire
+    input prompt, including the instruction after the image. Generated answer tokens
+    remain causal. Chunked prefill and prefix caching are disabled by default for
+    PaliGemma and PaliGemma 2. Explicitly enabling them is unsupported; use
+    `--no-enable-chunked-prefill --no-enable-prefix-caching` and keep
+    `--long-prefill-token-threshold 0` with adaptive long-prefill thresholds disabled.
+    KV transfer and KV offloading are also unsupported because a cached prefix
+    depends on the complete instruction. On PaliGemma 2's sliding layers, the
+    bidirectional prompt is still bounded by the layer's sliding window.
+
+!!! note
     `Gemma3nForConditionalGeneration` is only supported on V1 due to shared KV caching and it depends on `timm>=1.0.17` to make use of its
     MobileNet-v5 vision backbone.
 

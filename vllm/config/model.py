@@ -1636,6 +1636,11 @@ class ModelConfig:
     def is_mm_prefix_lm(self) -> bool:
         return self.model_arch_config.is_mm_prefix_lm
 
+    @cached_property
+    def is_full_prefix_lm(self) -> bool:
+        """Whether all prompt tokens, rather than media spans, are bidirectional."""
+        return self.is_mm_prefix_lm and self.hf_config.model_type == "paligemma"
+
     @property
     def rswa_window(self) -> int | None:
         return self.model_arch_config.rswa_window
@@ -2177,6 +2182,8 @@ class ModelConfig:
 
     @property
     def is_chunked_prefill_supported(self) -> bool:
+        if self.is_full_prefix_lm:
+            return False
         attn_type = self.attn_type
 
         if pooler_config := self.pooler_config:
@@ -2223,6 +2230,8 @@ class ModelConfig:
 
     @property
     def is_prefix_caching_supported(self) -> bool:
+        if self.is_full_prefix_lm:
+            return False
         attn_type = self.attn_type
 
         if pooler_config := self.pooler_config:

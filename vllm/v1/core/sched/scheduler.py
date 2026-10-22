@@ -806,6 +806,9 @@ class Scheduler(SchedulerInterface):
             num_new_tokens = self._reserve_prefill_lookahead(
                 request, request.num_computed_tokens, num_new_tokens
             )
+            num_new_tokens = self._require_complete_prefix(
+                request, request.num_computed_tokens, num_new_tokens
+            )
 
             if num_new_tokens == 0:
                 # The request cannot be scheduled because one of the following
@@ -1266,6 +1269,9 @@ class Scheduler(SchedulerInterface):
                     # Multi-module MTP: avoid ending a prefill chunk within
                     # num_prefill_lookahead of the prefill end.
                     num_new_tokens = self._reserve_prefill_lookahead(
+                        request, num_computed_tokens, num_new_tokens
+                    )
+                    num_new_tokens = self._require_complete_prefix(
                         request, num_computed_tokens, num_new_tokens
                     )
 
@@ -1865,6 +1871,18 @@ class Scheduler(SchedulerInterface):
 
         for input_id in duplicate_input_ids:
             self.encoder_cache_manager.check_and_update_cache(request, input_id)
+
+    def _require_complete_prefix(
+        self, request: Request, num_computed_tokens: int, num_new_tokens: int
+    ) -> int:
+        if (
+            self.vllm_config.model_config.is_full_prefix_lm
+            and not self.is_mm_encoder_only
+            and num_computed_tokens < request.num_prompt_tokens
+            and num_computed_tokens + num_new_tokens < request.num_prompt_tokens
+        ):
+            return 0
+        return num_new_tokens
 
     def _try_schedule_encoder_inputs(
         self,

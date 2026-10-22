@@ -730,3 +730,367 @@ def test_auto_video_decode_skipped_without_torchcodec():
         )
         == {}
     )
+
+
+@pytest.fixture(params=["gemma", "gemma2"])
+def paligemma_prefix_model(tmp_path, request):
+    from transformers import PaliGemmaConfig
+
+    config = PaliGemmaConfig(
+        text_config={
+            "model_type": request.param,
+            "sliding_window": 4 if request.param == "gemma2" else None,
+            "query_pre_attn_scalar": 8,
+            "hidden_size": 32,
+            "num_hidden_layers": 1,
+            "intermediate_size": 64,
+            "num_attention_heads": 4,
+            "num_key_value_heads": 1,
+            "head_dim": 8,
+            "vocab_size": 512,
+            "max_position_embeddings": 512,
+        },
+        vision_config={
+            "hidden_size": 32,
+            "intermediate_size": 64,
+            "num_hidden_layers": 1,
+            "num_attention_heads": 4,
+            "image_size": 32,
+            "patch_size": 16,
+            "projection_dim": 32,
+        },
+        projection_dim=32,
+        image_token_index=511,
+    )
+    from tokenizers import Tokenizer, models, pre_tokenizers
+    from transformers import (
+        PaliGemmaProcessor,
+        PreTrainedTokenizerFast,
+        SiglipImageProcessor,
+    )
+
+    tokenizer = Tokenizer(
+        models.WordLevel(
+            {"<unk>": 0, "<bos>": 1, "<eos>": 2, "caption": 3, "en": 4, "\n": 5},
+            unk_token="<unk>",
+        )
+    )
+    tokenizer.pre_tokenizer = pre_tokenizers.Whitespace()
+    tokenizer = PreTrainedTokenizerFast(
+        tokenizer_object=tokenizer,
+        unk_token="<unk>",
+        bos_token="<bos>",
+        eos_token="<eos>",
+    )
+    processor = PaliGemmaProcessor(
+        image_processor=SiglipImageProcessor(
+            size={"height": 32, "width": 32}, image_seq_length=4
+        ),
+        tokenizer=tokenizer,
+    )
+    processor.save_pretrained(tmp_path)
+    config.image_token_index = processor.image_token_id
+    config.architectures = ["PaliGemmaForConditionalGeneration"]
+    config.save_pretrained(tmp_path)
+    return ModelConfig(
+        model=str(tmp_path),
+        skip_tokenizer_init=True,
+        enforce_eager=True,
+        dtype="float32",
+        max_model_len=512,
+    )
+
+
+def _paligemma_prefix_config(model_config, **overrides):
+    from vllm.config import CacheConfig, DeviceConfig, SchedulerConfig
+
+    return VllmConfig(
+        model_config=model_config,
+        device_config=DeviceConfig(device="cpu"),
+        cache_config=CacheConfig(
+            enable_prefix_caching=overrides.pop("enable_prefix_caching", False),
+            kv_offloading_size=overrides.pop("kv_offloading_size", None),
+            kv_offloading_backend=overrides.pop("kv_offloading_backend", "native"),
+        ),
+        scheduler_config=SchedulerConfig(
+            is_encoder_decoder=False,
+            max_model_len=512,
+            max_num_batched_tokens=512,
+            max_num_seqs=2,
+            enable_chunked_prefill=overrides.pop("enable_chunked_prefill", False),
+            long_prefill_token_threshold=overrides.pop(
+                "long_prefill_token_threshold", 0
+            ),
+            long_prefill_token_threshold_adaptive=overrides.pop(
+                "long_prefill_token_threshold_adaptive", False
+            ),
+            max_num_scheduled_tokens=overrides.pop("max_num_scheduled_tokens", None),
+        ),
+        **overrides,
+    )
+
+
+def test_paligemma_prefix_defaults_require_complete_prompt(paligemma_prefix_model):
+    from vllm.engine.arg_utils import EngineArgs
+
+    args = EngineArgs(model=paligemma_prefix_model.model, skip_tokenizer_init=True)
+    args._set_default_chunked_prefill_and_prefix_caching_args(paligemma_prefix_model)
+    assert args.enable_chunked_prefill is False
+    assert args.enable_prefix_caching is False
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"enable_chunked_prefill": True},
+        {"enable_prefix_caching": True},
+        {"long_prefill_token_threshold": 32},
+        {"kv_offloading_size": 1},
+        {"long_prefill_token_threshold_adaptive": True},
+        {"max_num_scheduled_tokens": 128},
+        {"kv_offloading_size": 1, "kv_offloading_backend": "lmcache"},
+        {
+            "kv_transfer_config": {
+                "kv_connector": "ExampleConnector",
+                "kv_role": "kv_consumer",
+            }
+        },
+    ],
+)
+def test_paligemma_prefix_rejects_incomplete_context(paligemma_prefix_model, overrides):
+    with pytest.raises(ValueError, match="PaliGemma"):
+        _paligemma_prefix_config(paligemma_prefix_model, **overrides)
+
+
+def test_paligemma_prefix_allows_complete_uncached_prompt(paligemma_prefix_model):
+    config = _paligemma_prefix_config(paligemma_prefix_model)
+    assert not config.scheduler_config.enable_chunked_prefill
+    assert not config.cache_config.enable_prefix_caching
+
+
+def test_paligemma_prefix_semantics_survive_language_model_view(paligemma_prefix_model):
+    config = _paligemma_prefix_config(paligemma_prefix_model)
+    child = config.with_hf_config(paligemma_prefix_model.hf_text_config)
+    assert (
+        child.model_config.hf_config.model_type
+        == paligemma_prefix_model.hf_text_config.model_type
+    )
+    assert getattr(child.model_config, "is_full_prefix_lm", False)
+
+
+def test_paligemma_prefix_attention_inherits_outer_window_contract(
+    paligemma_prefix_model,
+):
+    from vllm.config import set_current_vllm_config
+    from vllm.model_executor.layers.attention.attention import Attention
+    from vllm.v1.attention.backends.flex_attention import FlexAttentionBackend
+
+    config = _paligemma_prefix_config(paligemma_prefix_model)
+    child = config.with_hf_config(paligemma_prefix_model.hf_text_config)
+    with set_current_vllm_config(child):
+        layer = Attention(
+            num_heads=4,
+            head_size=8,
+            scale=8**-0.5,
+            num_kv_heads=1,
+            cache_config=child.cache_config,
+            per_layer_sliding_window=4,
+            attn_backend=FlexAttentionBackend,
+            prefix="paligemma-prefix-test",
+        )
+    assert layer.mm_prefix_clamp_sliding_window
+
+
+def test_paligemma_prefix_waits_for_encoder_then_schedules_whole_prompt(
+    paligemma_prefix_model,
+):
+    from vllm.config import ModelConfig
+    from vllm.multimodal.inputs import (
+        MultiModalFeatureSpec,
+        MultiModalKwargsItem,
+        PlaceholderRange,
+    )
+    from vllm.sampling_params import SamplingParams
+    from vllm.v1.core.sched.scheduler import Scheduler
+    from vllm.v1.kv_cache_interface import (
+        FullAttentionSpec,
+        KVCacheConfig,
+        KVCacheGroupSpec,
+    )
+    from vllm.v1.request import Request
+    from vllm.v1.structured_output import StructuredOutputManager
+
+    model = ModelConfig(
+        model=paligemma_prefix_model.model,
+        skip_tokenizer_init=False,
+        enforce_eager=True,
+        dtype="float32",
+        max_model_len=512,
+    )
+    config = _paligemma_prefix_config(model)
+    config.cache_config.num_gpu_blocks = 128
+    kv_cache = KVCacheConfig(
+        num_blocks=128,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["layer"],
+                FullAttentionSpec(
+                    block_size=16, num_kv_heads=1, head_size=8, dtype=torch.float32
+                ),
+            )
+        ],
+    )
+    scheduler = Scheduler(
+        config,
+        kv_cache,
+        StructuredOutputManager(config),
+        block_size=16,
+        log_stats=False,
+    )
+    scheduler.max_num_encoder_input_tokens = 0
+    request = Request(
+        request_id="prefix",
+        prompt_token_ids=[1, 6, 6, 6, 6, 3, 4],
+        sampling_params=SamplingParams(max_tokens=1),
+        pooling_params=None,
+        mm_features=[
+            MultiModalFeatureSpec(
+                data=MultiModalKwargsItem({}),
+                modality="image",
+                identifier="offline-image",
+                mm_position=PlaceholderRange(offset=1, length=4),
+            )
+        ],
+    )
+    scheduler.add_request(request)
+    blocked = scheduler.schedule()
+    assert blocked.num_scheduled_tokens.get("prefix", 0) == 0
+    scheduler.max_num_encoder_input_tokens = 512
+    resumed = scheduler.schedule()
+    assert resumed.num_scheduled_tokens == {"prefix": request.num_prompt_tokens}
+
+
+def test_paligemma_prefix_ranges_exclude_resumed_output():
+    from vllm.multimodal.inputs import (
+        MultiModalFeatureSpec,
+        MultiModalKwargsItem,
+        PlaceholderRange,
+    )
+    from vllm.v1.worker.gpu.attn_utils import compute_mm_prefix_ranges
+    from vllm.v1.worker.gpu_input_batch import CachedRequestState
+
+    feature = MultiModalFeatureSpec(
+        data=MultiModalKwargsItem({}),
+        modality="image",
+        identifier="offline-image",
+        mm_position=PlaceholderRange(offset=1, length=4),
+    )
+    request = CachedRequestState(
+        req_id="prefix",
+        prompt_token_ids=[1, 6, 6, 6, 6, 3, 4],
+        mm_features=[feature],
+        sampling_params=None,
+        generator=None,
+        block_ids=([],),
+        num_computed_tokens=0,
+        output_token_ids=[7, 8, 9],
+    )
+    assert request.num_tokens > request.num_prompt_tokens
+    assert compute_mm_prefix_ranges(
+        [request.req_id],
+        {request.req_id: request.mm_features},
+        prompt_lens=[request.num_prompt_tokens],
+    ) == {0: [(0, 6)]}
+
+
+@pytest.mark.parametrize("clamp", [False, True])
+@pytest.mark.parametrize("window", [None, 3])
+def test_full_prefix_flex_mask_preserves_window_contract(clamp, window):
+    from vllm.v1.attention.backends.flex_attention import FlexAttentionMetadata
+
+    n = 8
+    prefix_len = 6
+    metadata = FlexAttentionMetadata(
+        causal=True,
+        num_actual_tokens=n,
+        max_query_len=n,
+        query_start_loc=torch.tensor([0, n], dtype=torch.int32),
+        query_start_loc_cpu=torch.tensor([0, n], dtype=torch.int32),
+        max_seq_len=n,
+        seq_lens=torch.tensor([n], dtype=torch.int32),
+        block_table=torch.tensor([[0]], dtype=torch.int32),
+        slot_mapping=torch.arange(n),
+        total_cache_tokens=n,
+        block_size=n,
+        max_possible_sequence_length=n,
+        num_reqs=1,
+        physical_to_logical=torch.tensor([[0]], dtype=torch.int32),
+        decode_offset=torch.tensor([0], dtype=torch.int32),
+        num_blocks_per_seq=torch.tensor([1], dtype=torch.int32),
+        persistent_kv_indices=torch.zeros((1, 1, 1), dtype=torch.int32),
+        persistent_kv_num_blocks=torch.zeros((1, 1), dtype=torch.int32),
+        persistent_doc_ids=torch.zeros(n, dtype=torch.int32),
+        doc_ids=torch.zeros(n, dtype=torch.int32),
+        direct_build=False,
+        sliding_window=window,
+        mm_prefix_range={0: [(0, prefix_len - 1)]},
+        mm_prefix_clamp_sliding_window=clamp,
+    )
+    mask = metadata.get_mask_mod()
+    for q in range(n):
+        for k in range(n):
+            in_window = window is None or abs(q - k) < window
+            expected = (k <= q and in_window) or (q < prefix_len and k < prefix_len)
+            if clamp:
+                expected &= in_window
+            assert (
+                bool(
+                    mask(
+                        torch.tensor(0),
+                        torch.tensor(0),
+                        torch.tensor(q),
+                        torch.tensor(k),
+                    )
+                )
+                == expected
+            )
+
+
+def test_full_prefix_ranges_allow_text_only_and_empty_requests():
+    from vllm.v1.worker.gpu.attn_utils import compute_mm_prefix_ranges
+
+    assert compute_mm_prefix_ranges(["text-only", "empty"], {}, prompt_lens=[7, 0]) == {
+        0: [(0, 6)],
+        1: [],
+    }
+
+
+@pytest.mark.parametrize("sliding_window,expected", [(None, [(1, 4)]), (2, [])])
+def test_legacy_mm_prefix_ranges_keep_media_spans(sliding_window, expected):
+    from vllm.multimodal.inputs import (
+        MultiModalFeatureSpec,
+        MultiModalKwargsItem,
+        PlaceholderRange,
+    )
+    from vllm.v1.worker.gpu.attn_utils import compute_mm_prefix_ranges
+
+    features = {
+        "legacy": [
+            MultiModalFeatureSpec(
+                data=MultiModalKwargsItem({}),
+                modality="image",
+                identifier="image",
+                mm_position=PlaceholderRange(offset=1, length=4),
+            ),
+            MultiModalFeatureSpec(
+                data=MultiModalKwargsItem({}),
+                modality="audio",
+                identifier="audio",
+                mm_position=PlaceholderRange(offset=5, length=3),
+            ),
+        ]
+    }
+    assert compute_mm_prefix_ranges(["legacy"], features, sliding_window) == {
+        0: expected
+    }

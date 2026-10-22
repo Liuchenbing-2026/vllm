@@ -1528,6 +1528,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.model_config.rswa_window is not None:
             # prompt_lens is only used in R-SWA case.
             prompt_lens = self.req_states.prompt_len.gpu[idx_mapping]
+        elif self.model_config.is_full_prefix_lm:
+            prompt_lens = torch.from_numpy(
+                self.req_states.prompt_len.np[idx_mapping_np]
+            )
 
         input_batch = InputBatch(
             req_ids=req_ids,

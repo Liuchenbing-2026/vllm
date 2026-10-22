@@ -100,7 +100,7 @@ class InputBatch:
     # Whether any requests in batch use structured output.
     has_structured_output_reqs: bool
 
-    # [num_reqs] per-request prompt length, only populated for R-SWA.
+    # [num_reqs] original prompt lengths: GPU for R-SWA, CPU for full-prefix LM.
     prompt_lens: torch.Tensor | None
 
     # [num_reqs] only populated for non-dummy pipeline-parallel batches.
