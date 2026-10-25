@@ -2044,6 +2044,51 @@ class TestThinkingConfig:
         assert result.thinking_token_budget == expected.thinking_token_budget
 
 
+class TestCountTokensToolChoice:
+    """Declaring tools must not imply ``auto`` on the counting endpoint.
+
+    ``/v1/messages/count_tokens`` only renders the prompt. Defaulting the tool
+    choice to ``auto`` there makes a stock server reject the request with
+    "requires --enable-auto-tool-choice and --tool-call-parser", which the
+    counting endpoint never needs.
+    """
+
+    TOOLS = [{"name": "bash", "input_schema": {}}]
+
+    def test_count_tokens_with_tools_leaves_tool_choice_unset(self):
+        result = _convert(
+            AnthropicCountTokensRequest(
+                model="test-model",
+                messages=[{"role": "user", "content": "Hello"}],
+                tools=self.TOOLS,
+            )
+        )
+        assert result.tool_choice is None
+        assert [t.function.name for t in result.tools] == ["bash"]
+
+    def test_messages_with_tools_still_defaults_auto(self):
+        result = _convert(
+            _make_request([{"role": "user", "content": "Hello"}], tools=self.TOOLS)
+        )
+        assert result.tool_choice == "auto"
+        assert [t.function.name for t in result.tools] == ["bash"]
+
+    @pytest.mark.parametrize(
+        ("choice", "expected"), [("none", "none"), ("any", "required")]
+    )
+    def test_count_tokens_honours_explicit_tool_choice(self, choice, expected):
+        result = _convert(
+            AnthropicCountTokensRequest(
+                model="test-model",
+                messages=[{"role": "user", "content": "Hello"}],
+                tools=self.TOOLS,
+                tool_choice={"type": choice},
+            )
+        )
+        assert result.tool_choice == expected
+        assert [t.function.name for t in result.tools] == ["bash"]
+
+
 class TestProbeDisabledThinkingEffort:
     """``auto`` falls back to ``low`` when ``none`` cannot turn thinking off."""
 

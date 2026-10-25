@@ -815,7 +815,15 @@ class AnthropicServingMessages(OpenAIServingChat):
                 )
             )
 
-        if req.tool_choice is None:
+        # `/v1/messages/count_tokens` only renders the prompt: it never samples
+        # and never parses model output, so declaring tools must not imply an
+        # `auto` tool choice. Implying it would make the counting endpoint fail
+        # with "requires --enable-auto-tool-choice and --tool-call-parser" on a
+        # stock server, even though counting needs no parser. Leave the choice
+        # unset there; an explicit client `tool_choice` is still honoured.
+        if req.tool_choice is None and not isinstance(
+            anthropic_request, AnthropicCountTokensRequest
+        ):
             req.tool_choice = "auto"
         req.tools = tools
 
