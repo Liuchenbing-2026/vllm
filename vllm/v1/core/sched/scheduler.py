@@ -125,6 +125,10 @@ class Scheduler(SchedulerInterface):
         )
         # Track requests scheduled in prior step (MRV1-only).
         self.prev_step_scheduled_req_ids: set[str] = set()
+        # Request IDs in the most recent worker persistent batch. Async
+        # scheduling can emit the next SchedulerOutput before that batch state
+        # is confirmed through ModelRunnerOutput.
+        self.prev_model_runner_batch_req_ids: set[str] = set()
 
         # Scheduling constraints.
         self.max_num_running_reqs = self.scheduler_config.max_num_seqs
@@ -1926,7 +1930,14 @@ class Scheduler(SchedulerInterface):
             if idx >= num_running_reqs:
                 resumed_req_ids.add(req_id)
             if not self.use_v2_model_runner:  # noqa: SIM102
-                if req_id not in self.prev_step_scheduled_req_ids:
+                if self.scheduler_config.async_scheduling:
+                    has_worker_state = (
+                        req_id in self.prev_step_scheduled_req_ids
+                        and req_id in self.prev_model_runner_batch_req_ids
+                    )
+                else:
+                    has_worker_state = req_id in self.prev_step_scheduled_req_ids
+                if not has_worker_state:
                     all_token_ids[req_id] = req.all_token_ids.copy()
             new_block_ids.append(
                 req_to_new_blocks[req_id].get_block_ids(allow_none=True)
@@ -2241,6 +2252,7 @@ class Scheduler(SchedulerInterface):
         kv_connector_output = model_runner_output.kv_connector_output
         ec_connector_output = model_runner_output.ec_connector_output
         cudagraph_stats = model_runner_output.cudagraph_stats
+        self.prev_model_runner_batch_req_ids = set(model_runner_output.req_id_to_index)
 
         # Every GPU write enqueued by this and earlier steps has completed, so it is
         # safe to return deferred-free blocks to the pool.

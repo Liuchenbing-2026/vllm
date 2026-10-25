@@ -804,6 +804,46 @@ def test_max_loras_counts_running_request_skipped_for_encoder_budget():
     assert req_c.status == RequestStatus.WAITING
 
 
+def test_async_scheduling_sends_tokens_until_worker_state_confirmed():
+    scheduler = create_scheduler(
+        async_scheduling=True,
+        use_v2_model_runner=False,
+    )
+    # Some CPU test environments cannot instantiate an executor that supports
+    # async scheduling and normalize this flag to False. Force the exact
+    # AsyncScheduler + MRV1 path exercised by this regression test.
+    scheduler.scheduler_config.async_scheduling = True
+    (req,) = create_requests(num_requests=1, num_tokens=8)
+    scheduler.add_request(req)
+
+    first_output = scheduler.schedule()
+    assert first_output.scheduled_cached_reqs.num_reqs == 0
+
+    # The request was scheduled in the previous scheduler step, but no worker
+    # output has confirmed that it entered the persistent batch yet.
+    second_output = scheduler.schedule()
+    second_cached_reqs = second_output.scheduled_cached_reqs
+    assert req.request_id in second_cached_reqs.req_ids
+    assert req.request_id in second_cached_reqs.all_token_ids
+
+    model_output = ModelRunnerOutput(
+        req_ids=[req.request_id],
+        req_id_to_index={req.request_id: 0},
+        sampled_token_ids=[[100]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+    scheduler.update_from_output(first_output, model_output)
+
+    # Once the worker reports the request in its persistent batch, the
+    # scheduler may omit the full token payload again.
+    third_output = scheduler.schedule()
+    third_cached_reqs = third_output.scheduled_cached_reqs
+    assert req.request_id in third_cached_reqs.req_ids
+    assert req.request_id not in third_cached_reqs.all_token_ids
+
+
 def test_cached_request_data_resumed_all_token_ids_mrv1_only():
     """all_token_ids carries a resumed request's token ids to the connector
     for the V1 model runner, but is skipped entirely for the V2 model runner.
