@@ -4,6 +4,7 @@
 import json
 
 import anthropic
+import httpx
 import pytest
 import pytest_asyncio
 
@@ -34,6 +35,90 @@ def server():
 async def client(server):
     async with server.get_async_client_anthropic() as async_client:
         yield async_client
+
+
+@pytest.fixture(scope="module")
+def server_without_tool_parser():
+    args = [
+        "--max-model-len",
+        "2048",
+        "--enforce-eager",
+        "--served-model-name",
+        "count-tools",
+        "--exclude-tools-when-tool-choice-none",
+    ]
+    with RemoteOpenAIServer("Qwen/Qwen2.5-0.5B-Instruct", args) as remote_server:
+        yield remote_server
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "tool_choice",
+    [None, {"type": "auto"}, {"type": "any"}, {"type": "tool", "name": "get_weather"}],
+)
+async def test_count_tokens_tools_without_output_parser(
+    server_without_tool_parser, tool_choice
+):
+    """Count full tool prompts without allowing unparsable tool generation."""
+    server = server_without_tool_parser
+    messages = [{"role": "user", "content": "What is the weather in Paris?"}]
+    schema = {
+        "type": "object",
+        "properties": {"city": {"type": "string"}},
+        "required": ["city"],
+    }
+    body = {
+        "model": "count-tools",
+        "messages": messages,
+        "tools": [{"name": "get_weather", "input_schema": schema}],
+    }
+    if tool_choice is not None:
+        body["tool_choice"] = tool_choice
+    async with httpx.AsyncClient() as http:
+        plain_body = {"model": "count-tools", "messages": messages}
+        plain = await http.post(
+            server.url_for("v1/messages/count_tokens"), json=plain_body
+        )
+        assert plain.status_code == 200, plain.text
+
+        tokenized = await http.post(
+            server.url_for("tokenize"),
+            json={
+                **plain_body,
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "parameters": schema,
+                        },
+                    }
+                ],
+            },
+        )
+        assert tokenized.status_code == 200, tokenized.text
+        expected = tokenized.json()["count"]
+        assert expected > plain.json()["input_tokens"]
+
+        counted = await http.post(server.url_for("v1/messages/count_tokens"), json=body)
+        assert counted.status_code == 200, counted.text
+        assert counted.json()["input_tokens"] == expected
+
+        excluded = await http.post(
+            server.url_for("v1/messages/count_tokens"),
+            json={
+                **body,
+                "tool_choice": {"type": "none"},
+            },
+        )
+        assert excluded.status_code == 200, excluded.text
+        assert excluded.json()["input_tokens"] == plain.json()["input_tokens"]
+
+        generated = await http.post(
+            server.url_for("v1/messages"), json={**body, "max_tokens": 1}
+        )
+        assert generated.status_code == 400, generated.text
+        assert "--tool-call-parser" in generated.json()["error"]["message"]
 
 
 @pytest.mark.asyncio

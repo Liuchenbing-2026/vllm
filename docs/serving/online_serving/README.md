@@ -29,6 +29,12 @@ We currently support the following OpenAI APIs:
 
 - Anthropic messages API (`/v1/messages`, `/v1/messages/count_tokens`)
 
+`/v1/messages/count_tokens` includes tool definitions in the rendered prompt
+without requiring `--enable-auto-tool-choice` or `--tool-call-parser`.
+Tool generation through `/v1/messages` still requires the appropriate tool
+parser configuration. Explicit `tool_choice: {"type": "none"}` continues to
+honor `--exclude-tools-when-tool-choice-none` when that option is enabled.
+
 ## Cohere APIs
 
 - [Cohere Embed API](../../models/pooling_models/embed.md#cohere-embed-api) (`/v2/embed`)
