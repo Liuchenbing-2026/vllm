@@ -156,8 +156,27 @@ def test_d3_prefix_bidir_matches_the_checkpoint_runtime(
             ],
             use_tqdm=False,
         )
+        # New request IDs and reversed scheduling order must not reuse another
+        # request's state/question boundary after the first batch is removed.
+        repeated = vllm_model.llm.classify(
+            [{"prompt_token_ids": ids} for ids in reversed(sequences)],
+            pooling_params=[
+                PoolingParams(extra_kwargs={"d3_state_tokens": state})
+                for state in reversed(states[:-1])
+            ],
+            use_tqdm=False,
+        )
     vllm_logits = [torch.tensor(output.outputs.probs) for output in outputs]
 
     for ref, ours, count in zip(ref_logits, vllm_logits, counts):
         ref_probs, our_probs = option_probs(ref, count), option_probs(ours, count)
         torch.testing.assert_close(our_probs, ref_probs, atol=0.02, rtol=0)
+    for ref, output, count in zip(
+        reversed(ref_logits[:-1]), repeated, reversed(counts[:-1])
+    ):
+        torch.testing.assert_close(
+            option_probs(torch.tensor(output.outputs.probs), count),
+            option_probs(ref, count),
+            atol=0.02,
+            rtol=0,
+        )

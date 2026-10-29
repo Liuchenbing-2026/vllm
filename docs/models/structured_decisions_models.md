@@ -370,9 +370,10 @@ vllm serve vllm-sr/d3-turbo --max-model-len 131072
   and an empty state as `(empty)`.
 - The full attention layers read the whole prompt in both directions, or with
   `prefix_bidir` its state and question blocks, as the checkpoint declares, so
-  chunked prefill and prefix caching are off. `prefix_bidir` runs on CUDA and
-  ROCm GPUs with Model Runner V2 and an attention backend that takes PrefixLM
-  ranges, which vLLM selects (Triton, or FlashAttention 4 where available).
+  chunked prefill and prefix caching are off. `prefix_bidir` requires Model Runner V2 and an attention backend that
+  supports PrefixLM ranges (for example Triton or FlashAttention 4 on GPUs).
+  Hardware plugins must preserve the request ranges in their model state
+  and supply a compatible attention backend.
   The state is read again for each question of a request.
 - `instructions` returns 400, since the prompt is fixed.
   `chat_template_kwargs` has no effect.

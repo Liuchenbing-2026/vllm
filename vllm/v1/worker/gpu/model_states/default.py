@@ -61,8 +61,16 @@ class DefaultModelState(ModelState):
         self.mm_pruner = maybe_create_mm_pruner(
             self.model_config, model, self.rope_state, encoder_cache
         )
+        self.request_prefix_ranges: dict[str, list[tuple[int, int]]] = {}
 
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
+        prefix_ranges = getattr(self.model, "get_request_prefix_ranges", None)
+        if prefix_ranges is not None:
+            ranges = prefix_ranges(new_req_data)
+            if ranges:
+                self.request_prefix_ranges[new_req_data.req_id] = ranges
+            else:
+                self.request_prefix_ranges.pop(new_req_data.req_id, None)
         if self.rope_state is not None:
             assert new_req_data.prefill_token_ids is not None
             # `prompt_embeds` is a passthrough modality with no grid info, but
@@ -80,6 +88,7 @@ class DefaultModelState(ModelState):
             self.prompt_embeds_state.add_request(req_index, new_req_data)
 
     def remove_request(self, req_id: str) -> None:
+        self.request_prefix_ranges.pop(req_id, None)
         if self.prompt_embeds_state is not None:
             self.prompt_embeds_state.remove_request(req_id)
 
@@ -160,14 +169,19 @@ class DefaultModelState(ModelState):
         self, input_batch: InputBatch
     ) -> dict[int, list[tuple[int, int]]] | None:
         """PrefixLM bidirectional token ranges per request index of the batch."""
+        model_ranges = {
+            i: self.request_prefix_ranges[req_id]
+            for i, req_id in enumerate(input_batch.req_ids)
+            if req_id in self.request_prefix_ranges
+        }
         if not (
             self.supports_mm_inputs
             and self.encoder_cache is not None
             and self.model_config.is_mm_prefix_lm
         ):
-            return None
+            return model_ranges or None
         hf_text_config = self.model_config.hf_text_config
-        return compute_mm_prefix_ranges(
+        ranges = compute_mm_prefix_ranges(
             [
                 self.encoder_cache.mm_features.get(req_id, ())
                 for req_id in input_batch.req_ids
@@ -179,6 +193,7 @@ class DefaultModelState(ModelState):
             or getattr(hf_text_config, "mm_prefix_clamp_sliding_window", False),
             span_pad=getattr(self.model, "mm_prefix_span_leading_pad_modulus", 0),
         )
+        return {**(ranges or {}), **model_ranges} or None
 
     def prepare_dummy_inputs(self, num_reqs: int, num_tokens: int) -> dict[str, Any]:
         model_inputs = {}
