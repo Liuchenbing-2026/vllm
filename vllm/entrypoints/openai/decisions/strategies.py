@@ -1513,6 +1513,8 @@ class StartLuxStrategy(D3Strategy):
         )
         if not decision:
             raise ValueError("StartLux requires decision_config.json")
+        # StartLux reads the complete prompt; it does not use D3 state blocks.
+        self.state_blocks = False
         self.codes = list(LABELS)
         self.temperatures = {
             kind: float(decision["temperature_by_type"][kind])
