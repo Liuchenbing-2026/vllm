@@ -327,6 +327,7 @@ _SEQUENCE_CLASSIFICATION_MODELS = {
         "GteNewForSequenceClassification",
     ),
     "JambaForSequenceClassification": ("jamba", "JambaForSequenceClassification"),
+    "LayaForDecision": ("laya", "LayaForDecision"),
     "LlamaBidirectionalForSequenceClassification": (
         "llama",
         "LlamaBidirectionalForSequenceClassification",
@@ -346,6 +347,14 @@ _SEQUENCE_CLASSIFICATION_MODELS = {
     "LlamaNemotronVLForSequenceClassification": (
         "nemotron_vl",
         "LlamaNemotronVLForSequenceClassification",
+    ),
+    "StartLuxDecisionForSequenceClassification": (
+        "startlux_decision",
+        "StartLuxDecisionForSequenceClassification",
+    ),
+    "StartLuxDecisionMoeForSequenceClassification": (
+        "startlux_decision",
+        "StartLuxDecisionMoeForSequenceClassification",
     ),
 }
 
