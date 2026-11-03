@@ -349,7 +349,7 @@ def test_asr_dataset_audio_duration_filter(
 ) -> None:
     from tokenizers import Tokenizer
     from tokenizers.models import WordLevel
-    from transformers import PreTrainedTokenizerFast
+    from transformers import TokenizersBackend
 
     sample_rate = 16000
     path = tmp_path / "audio.wav"
@@ -361,7 +361,7 @@ def test_asr_dataset_audio_duration_filter(
     dataset = datasets_module.ASRDataset(
         dataset_path="local-fixture", dataset_split="test", disable_shuffle=True
     )
-    tokenizer = PreTrainedTokenizerFast(
+    tokenizer = TokenizersBackend(
         tokenizer_object=Tokenizer(WordLevel({"[UNK]": 0}, unk_token="[UNK]")),
         unk_token="[UNK]",
     )
