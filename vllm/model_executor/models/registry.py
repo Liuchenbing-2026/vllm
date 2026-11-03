@@ -293,6 +293,9 @@ _REWARD_MODELS = {
 }
 
 _TOKEN_CLASSIFICATION_MODELS = {
+    "PplxDeciderForTokenClassification": (
+        "pplx_decider", "PplxDeciderForTokenClassification",
+    ),
     "BertForTokenClassification": ("bert", "BertForTokenClassification"),
     "ModernBertForTokenClassification": (
         "modernbert",
@@ -339,6 +342,10 @@ _SEQUENCE_CLASSIFICATION_MODELS = {
     "LlamaNemotronVLForSequenceClassification": (
         "nemotron_vl",
         "LlamaNemotronVLForSequenceClassification",
+    ),
+    "PplxDeciderForSequenceClassification": (
+        "pplx_decider",
+        "PplxDeciderForSequenceClassification",
     ),
 }
 
