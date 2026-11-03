@@ -328,3 +328,48 @@ def test_asr_dataset_unknown_tokenizer_gets_empty_prompt(tmp_path: Path) -> None
     )
     assert len(samples) == 1
     assert samples[0].prompt == ""
+
+
+@pytest.mark.parametrize("channels", [1, 2, 4])
+@pytest.mark.parametrize("embedded", [False, True], ids=["path", "bytes"])
+@pytest.mark.parametrize(
+    "seconds,min_seconds,max_seconds,expected_count",
+    [(1, 0.5, 1.5, 1), (2, 0.0, 1.5, 0), (1, 1.0, 1.0, 1)],
+    ids=["above-min", "above-max", "inclusive-bounds"],
+)
+def test_asr_dataset_audio_duration_filter(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    channels: int,
+    embedded: bool,
+    seconds: int,
+    min_seconds: float,
+    max_seconds: float,
+    expected_count: int,
+) -> None:
+    from tokenizers import Tokenizer
+    from tokenizers.models import WordLevel
+    from transformers import PreTrainedTokenizerFast
+
+    sample_rate = 16000
+    path = tmp_path / "audio.wav"
+    sf.write(path, np.zeros((seconds * sample_rate, channels)), sample_rate)
+    audio = {"bytes": path.read_bytes(), "path": None} if embedded else str(path)
+    monkeypatch.setattr(
+        datasets_module, "load_dataset", lambda *args, **kwargs: [{"audio": audio}]
+    )
+    dataset = datasets_module.ASRDataset(
+        dataset_path="local-fixture", dataset_split="test", disable_shuffle=True
+    )
+    tokenizer = PreTrainedTokenizerFast(
+        tokenizer_object=Tokenizer(WordLevel({"[UNK]": 0}, unk_token="[UNK]")),
+        unk_token="[UNK]",
+    )
+    samples = dataset.sample(
+        tokenizer=tokenizer,
+        num_requests=1,
+        no_oversample=True,
+        asr_min_audio_len_sec=min_seconds,
+        asr_max_audio_len_sec=max_seconds,
+    )
+    assert len(samples) == expected_count

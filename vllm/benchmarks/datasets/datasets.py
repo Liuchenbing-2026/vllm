@@ -4037,7 +4037,7 @@ class ASRDataset(HuggingFaceDataset):
             elif isinstance(audio, dict) and audio.get("bytes") is not None:
                 with BytesIO(audio["bytes"]) as audio_buffer:
                     y, sr = sf.read(audio_buffer, dtype="float32")
-                duration_s = get_audio_duration(y=y, sr=sr)
+                duration_s = len(y) / sr
                 mm_content = {"audio": (y, sr)}
             elif isinstance(audio, dict) and audio.get("path"):
                 duration_s = sf.info(audio["path"]).duration

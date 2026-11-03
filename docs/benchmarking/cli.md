@@ -93,11 +93,16 @@ Legend:
 
 !!! note
     HuggingFace dataset's `dataset-name` should be set to `hf`.
+
     For local `dataset-path`, please set `hf-name` to its Hugging Face ID like
 
     ```bash
     --dataset-path /datasets/VisionArena-Chat/ --hf-name lmarena-ai/VisionArena-Chat
     ```
+
+For HuggingFace ASR datasets, `--asr-min-audio-len-sec` and
+`--asr-max-audio-len-sec` filter by audio duration in seconds, independent of
+the number of channels and whether audio is stored as a path or embedded bytes.
 
 ## Examples
 
