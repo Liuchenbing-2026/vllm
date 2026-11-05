@@ -53,6 +53,7 @@ from vllm.multimodal.inputs import (
     PlaceholderRange,
 )
 from vllm.outputs import RequestOutput
+from vllm.platforms import current_platform
 from vllm.renderers.chat_utils import AsyncMultiModalItemTracker
 from vllm.renderers.online_derenderer import OnlineDerenderer
 from vllm.renderers.online_renderer import OnlineRenderer
@@ -395,6 +396,20 @@ class ServingTokens(GenerateBaseServing):
                 default_sampling_params=self.default_sampling_params,
                 override_max_tokens=self.override_max_tokens,
             )
+        elif sampling_params.max_tokens is None:
+            input_length = self._extract_prompt_len(engine_input)
+            if (
+                self.override_max_tokens is not None
+                or current_platform.get_max_output_tokens(input_length) is not None
+            ):
+                # Explicit null skips model defaults, but not deployment limits.
+                sampling_params.max_tokens = get_max_tokens(
+                    max_model_len=self.model_config.max_model_len,
+                    max_tokens=None,
+                    input_length=input_length,
+                    default_sampling_params={},
+                    override_max_tokens=self.override_max_tokens,
+                )
 
         if self.force_no_detokenize:
             sampling_params.detokenize = False

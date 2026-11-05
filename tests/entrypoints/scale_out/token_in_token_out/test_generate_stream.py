@@ -1878,3 +1878,55 @@ async def test_stream_derender_chunk_has_no_null_delta_keys():
         .delta.content
         == "a"
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "override,platform_cap,expected",
+    [
+        (None, None, None),
+        (8, None, 8),
+        (None, 7, 7),
+        (8, 7, 7),
+        (0, None, 0),
+        (None, 0, 0),
+        (100, None, 97),
+        (None, 100, 97),
+    ],
+)
+async def test_explicit_null_max_tokens_respects_deployment_caps(
+    monkeypatch, override, platform_cap, expected
+):
+    """Explicit null ignores model defaults but cannot bypass deployment caps."""
+    from vllm.platforms import current_platform
+
+    engine = _mock_engine()
+    engine.model_config.diff_sampling_param = {"max_tokens": 2}
+    engine.model_config.generation_config = "vllm"
+    engine.model_config.override_generation_config = (
+        {} if override is None else {"max_new_tokens": override}
+    )
+    monkeypatch.setattr(
+        current_platform, "get_max_output_tokens", lambda input_length: platform_cap
+    )
+    observed = []
+
+    async def mock_generate(prompt, sampling_params, *args, **kwargs):
+        observed.append(sampling_params.max_tokens)
+        yield _make_request_output(
+            "req-1", token_ids=[10], finish_reason="stop", finished=True
+        )
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _build_serving_tokens(engine)
+    request = GenerateRequest.model_validate(
+        {
+            "model": MODEL_NAME,
+            "token_ids": [1, 2, 3],
+            "sampling_params": {"max_tokens": None},
+            "stream": False,
+        }
+    )
+    response = await serving.serve_tokens(request)
+    assert isinstance(response, GenerateTokensResponse)
+    assert observed == [expected]
