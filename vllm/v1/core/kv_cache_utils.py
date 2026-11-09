@@ -1464,9 +1464,33 @@ def _get_kv_cache_groups_uniform_page_size(
     # is the minimum number of layers among all attention types. Need a better
     # strategy if we want to support more complex patterns (e.g., 20 full + 30
     # sw, where the group size should be 10).
-    min_num_layers = min([len(layers) for layers in layer_buckets])
+    max_num_layers_all = max([len(layers) for layers in layer_buckets])
+    # A speculative-decoding drafter contributes only a handful of layers of a
+    # type of its own, and they may form a bucket of their own (e.g. an
+    # EAGLE-4 draft layer whose sliding window differs from the target's).
+    # Such a bucket carries no repeating pattern across the model, so it must
+    # not be used to derive ``group_size``: with a single layer it collapses
+    # ``group_size`` to 1 and gives every target layer its own KV cache group.
+    # Each group then owns a private block table and attention metadata
+    # builder, which on Ascend measured ~63 ms of host time per decode step.
+    # Keep those buckets whole (one group each) and size the groups from the
+    # buckets that actually repeat.
+    drafter_bucket_ids = {
+        i
+        for i, layers in enumerate(layer_buckets)
+        if len(layers) <= 3 and len(layers) * 4 <= max_num_layers_all
+    }
+    pattern_buckets = [
+        layers
+        for i, layers in enumerate(layer_buckets)
+        if i not in drafter_bucket_ids
+    ]
+    if not pattern_buckets:
+        pattern_buckets = list(layer_buckets)
+        drafter_bucket_ids = set()
+    min_num_layers = min([len(layers) for layers in pattern_buckets])
     group_size = min_num_layers
-    max_num_layers = max([len(layers) for layers in layer_buckets])
+    max_num_layers = max([len(layers) for layers in pattern_buckets])
     if max_num_layers < min_num_layers * 1.5:
         # If the number of layers is not much larger than the minimum number of
         # layers, use the maximum number of layers as the group size to avoid
@@ -1477,7 +1501,7 @@ def _get_kv_cache_groups_uniform_page_size(
         # extra layers to one attention type.
         group_size = max_num_layers
     grouped_layers = []
-    for layers in layer_buckets:
+    for layers in pattern_buckets:
         num_padding_layers = group_size - len(layers) % group_size
         if num_padding_layers != group_size:
             logger.warning(
@@ -1499,6 +1523,11 @@ def _get_kv_cache_groups_uniform_page_size(
         # instead of layers[i * group_size: (i + 1) * group_size]
         for i in range(num_groups):
             grouped_layers.append(layers[i::num_groups])
+    # Drafter layers keep one group each: they have no pattern to align with
+    # the target, and appending them last keeps "the drafter group is last"
+    # true for consumers that rely on registration order.
+    for i in sorted(drafter_bucket_ids):
+        grouped_layers.append(list(layer_buckets[i]))
     return create_kv_cache_group_specs(kv_cache_spec, grouped_layers)
 
 

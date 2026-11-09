@@ -208,7 +208,7 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
         # we can also reuse the attention metadata (e.g., query_start_loc,
         # seq_lens) of the target model.
         if aux_hidden_states:
-            assert self.method == "eagle3"
+            assert self.method in ("eagle3", "eagle4")
             hidden_states = self.model.combine_hidden_states(
                 torch.cat(aux_hidden_states, dim=-1)
             )

@@ -464,7 +464,9 @@ class Eagle3LlamaForCausalLM(_Eagle3LlamaForCausalLMBase):
         if not self.model.norm_before_fc:
             orig_to_new_substr["input_norm."] = None
         loader = AutoWeightsLoader(self)
-        loader.load_weights(
+        mapper = WeightsMapper(orig_to_new_substr=orig_to_new_substr)
+        mapper |= getattr(self, "hf_to_vllm_mapper", WeightsMapper())
+        return loader.load_weights(
             model_weights.items(),
-            mapper=WeightsMapper(orig_to_new_substr=orig_to_new_substr),
+            mapper=mapper,
         )

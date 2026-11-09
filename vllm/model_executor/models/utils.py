@@ -875,6 +875,7 @@ def spec_decode_needs_target_embed(
     if speculative_config.method not in (
         "eagle",
         "eagle3",
+        "eagle4",
         "dflash",
         "dspark",
     ) and not (include_mtp and speculative_config.method == "mtp"):

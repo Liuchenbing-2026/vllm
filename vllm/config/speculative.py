@@ -68,7 +68,12 @@ NgramGPUTypes = Literal["ngram_gpu"]
 DFlashModelTypes = Literal["dflash"]
 DSparkModelTypes = Literal["dspark"]
 EagleModelTypes = Literal[
-    "eagle", "eagle3", "extract_hidden_states", MTPModelTypes, DFlashModelTypes
+    "eagle",
+    "eagle3",
+    "eagle4",
+    "extract_hidden_states",
+    MTPModelTypes,
+    DFlashModelTypes,
 ]
 SpeculativeMethod = Literal[
     "ngram",
@@ -383,6 +388,142 @@ _DRAFT_VLLM_CONFIG_OVERRIDES = (
 )
 
 
+def _validate_eagle4_draft_config(
+    target_model_config: ModelConfig,
+    draft_model_config: ModelConfig,
+) -> None:
+    """Validate the EAGLE-4 structures supported by this vLLM port."""
+    hf_config = draft_model_config.hf_config
+    if getattr(hf_config, "num_hidden_layers", None) != 1:
+        raise ValueError(
+            "EAGLE-4 currently supports a single draft decoder layer."
+        )
+    if getattr(hf_config, "num_aux_hidden_states", None) != 3:
+        raise ValueError("EAGLE-4 requires exactly three auxiliary hidden states.")
+
+    eagle_config = getattr(hf_config, "eagle_config", None) or {}
+    if not isinstance(eagle_config, Mapping):
+        raise ValueError("EAGLE-4 eagle_config must be a mapping.")
+    layer_ids = eagle_config.get("eagle_aux_hidden_state_layer_ids")
+    if not isinstance(layer_ids, (list, tuple)) or len(layer_ids) != 3:
+        raise ValueError(
+            "EAGLE-4 eagle_config.eagle_aux_hidden_state_layer_ids must "
+            "contain exactly three layer ids."
+        )
+    if eagle_config.get("use_aux_hidden_state", True) is not True:
+        raise NotImplementedError(
+            "EAGLE-4 requires target auxiliary hidden states."
+        )
+
+    target_hidden_size = target_model_config.hf_text_config.hidden_size
+    draft_target_hidden_size = getattr(
+        hf_config, "target_hidden_size", target_hidden_size
+    )
+    if draft_target_hidden_size != target_hidden_size:
+        raise ValueError(
+            "EAGLE-4 target_hidden_size does not match the target model: "
+            f"{draft_target_hidden_size} != {target_hidden_size}."
+        )
+    draft_hidden_size = getattr(hf_config, "hidden_size", None)
+    if draft_hidden_size != draft_target_hidden_size:
+        raise ValueError(
+            "EAGLE-4 draft hidden_size must match target_hidden_size: "
+            f"{draft_hidden_size} != {draft_target_hidden_size}."
+        )
+
+    vocab_size = getattr(hf_config, "vocab_size", None)
+    draft_vocab_size = getattr(hf_config, "draft_vocab_size", vocab_size)
+    if draft_vocab_size != vocab_size:
+        raise NotImplementedError(
+            "EAGLE-4 reduced-vocabulary (d2t) drafts are not supported."
+        )
+    target_vocab_size = getattr(
+        target_model_config.hf_text_config, "vocab_size", None
+    )
+    if target_vocab_size is not None and draft_vocab_size != target_vocab_size:
+        raise ValueError(
+            "EAGLE-4 full-vocabulary head must match the target vocabulary: "
+            f"{draft_vocab_size} != {target_vocab_size}."
+        )
+    if getattr(hf_config, "tie_word_embeddings", False):
+        raise NotImplementedError(
+            "EAGLE-4 requires an independent full-vocabulary LM head."
+        )
+
+    head = getattr(hf_config, "efficient_lm_head_config", None)
+    if not isinstance(head, Mapping):
+        raise ValueError(
+            "EAGLE-4 requires an efficient_lm_head_config mapping."
+        )
+    if head.get("type") != "low_rank":
+        raise ValueError(
+            "EAGLE-4 efficient_lm_head_config.type must be 'low_rank'; "
+            "weighted candidate heads are not supported yet."
+        )
+    for name in ("rank", "num_candidates"):
+        value = head.get(name)
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError(
+                f"EAGLE-4 efficient_lm_head_config.{name} must be a positive integer."
+            )
+    if head["num_candidates"] > vocab_size:
+        raise ValueError(
+            "EAGLE-4 efficient_lm_head_config.num_candidates cannot exceed "
+            "the vocabulary size."
+        )
+
+    unsupported = {
+        "enable_moe": True,
+        "attn_norm": True,
+        "enable_post_mlp_norm": True,
+    }
+    for name, value in unsupported.items():
+        if getattr(hf_config, name, False) == value:
+            raise NotImplementedError(
+                f"EAGLE-4 {name}={value!r} drafts are not supported."
+            )
+
+    # EAGLE-4 checkpoints name the outputs of the target layers. vLLM's
+    # auxiliary-state hook captures the input of a layer, which is the output
+    # of the preceding layer. Normalize once here so every runner sees the same
+    # capture indices.
+    source_layer_ids = tuple(int(layer_id) for layer_id in layer_ids)
+    previous_source_ids = getattr(
+        hf_config, "_eagle4_checkpoint_aux_layer_ids", None
+    )
+    if previous_source_ids is None:
+        hf_config._eagle4_checkpoint_aux_layer_ids = source_layer_ids
+    elif tuple(previous_source_ids) != source_layer_ids:
+        raise ValueError(
+            "EAGLE-4 auxiliary layer ids changed after validation."
+        )
+    hf_config.eagle_aux_hidden_state_layer_ids = tuple(
+        layer_id + 1 for layer_id in source_layer_ids
+    )
+
+
+def _configure_eagle4_runtime(speculative_config: "SpeculativeConfig") -> None:
+    """Apply the runtime defaults required by the EAGLE-4 candidate head."""
+    if speculative_config.draft_sample_method != "greedy":
+        raise ValueError(
+            "EAGLE-4 candidate logits currently support greedy drafting only."
+        )
+    if speculative_config.enable_adaptive_verification:
+        raise NotImplementedError(
+            "EAGLE-4 local candidate sampling does not materialize full draft "
+            "logits and cannot use adaptive verification."
+        )
+    if speculative_config.parallel_drafting:
+        raise NotImplementedError(
+            "EAGLE-4 parallel/tree drafting is not supported; "
+            "use the single-layer chain draft."
+        )
+    # The checkpoint stores a rank-compressed candidate head in addition to
+    # the full LM head. Candidate-head sampling avoids materializing and
+    # reducing the full vocabulary on every draft step.
+    speculative_config.use_local_argmax_reduction = True
+
+
 @config
 class SpeculativeConfig:
     """Configuration for speculative decoding."""
@@ -625,6 +766,7 @@ class SpeculativeConfig:
         # they return intermediate hidden states in addition to the final hidden state.
         uses_aux_hidden_states = self.method in (
             "eagle3",
+            "eagle4",
             "extract_hidden_states",
             "dflash",
             "dspark",
@@ -1324,7 +1466,13 @@ class SpeculativeConfig:
                         draft_hf.truncated_vocab_size = target_vocab
 
                 # Automatically detect the method
-                if self.method in ("eagle", "eagle3", "dflash", "dspark"):
+                if self.method in (
+                    "eagle",
+                    "eagle3",
+                    "eagle4",
+                    "dflash",
+                    "dspark",
+                ):
                     pass
                 # examples:
                 # yuhuili/EAGLE-LLaMA3-Instruct-8B
@@ -1335,6 +1483,8 @@ class SpeculativeConfig:
                     self.method = "eagle"
                 elif "eagle3" in self.draft_model_config.model.lower():
                     self.method = "eagle3"
+                elif "LlamaForCausalLMEagle4" in self.draft_model_config.architectures:
+                    self.method = "eagle4"
                 elif (
                     "dflash" in self.draft_model_config.model.lower()
                     or "MuseGlimmerAssistantModel"
@@ -1390,7 +1540,7 @@ class SpeculativeConfig:
                         f"Unsupported speculative method: '{self.method}'"
                     )
 
-                if self.method in ("eagle", "eagle3"):
+                if self.method in ("eagle", "eagle3", "eagle4"):
                     # EAGLE drafts share the target's positional space; a
                     # draft checkpoint with a smaller max_position_embeddings
                     # than the target under-sizes its rotary cache (#48894).
@@ -1399,8 +1549,13 @@ class SpeculativeConfig:
                         self.target_model_config.max_model_len,
                     )
 
+                if self.method == "eagle4":
+                    _validate_eagle4_draft_config(
+                        self.target_model_config, self.draft_model_config
+                    )
+
                 # Replace hf_config for EAGLE draft_model
-                if self.method in ("eagle", "eagle3", "dflash"):
+                if self.method in ("eagle", "eagle3", "eagle4", "dflash"):
                     from vllm.transformers_utils.configs.eagle import EAGLEConfig
                     from vllm.transformers_utils.configs.speculators import (
                         SpeculatorsConfig,
@@ -1590,6 +1745,9 @@ class SpeculativeConfig:
                 "the draft logits, which use_local_argmax_reduction never "
                 "materializes. Disable one of them."
             )
+
+        if self.method == "eagle4":
+            _configure_eagle4_runtime(self)
 
         return self
 
@@ -1945,7 +2103,14 @@ class SpeculativeConfig:
         # NOTE: This method is usually a stand-in for "speculative decoding using
         # target model hidden states"
         # TODO(ben): Refactor this so the naming is clearer
-        return self.method in ("eagle", "eagle3", "mtp", "dflash", "dspark")
+        return self.method in (
+            "eagle",
+            "eagle3",
+            "eagle4",
+            "mtp",
+            "dflash",
+            "dspark",
+        )
 
     def use_eagle_block_drop(self) -> bool:
         """Whether volatile trailing cache blocks should be discarded."""

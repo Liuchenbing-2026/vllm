@@ -299,6 +299,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
             if self.speculative_config.method in (
                 "eagle3",
+                "eagle4",
                 "dflash",
                 "dspark",
                 "extract_hidden_states",
