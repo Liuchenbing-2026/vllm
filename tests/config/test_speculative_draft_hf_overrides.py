@@ -68,6 +68,49 @@ def _make_speculative_config(
 
 
 @pytest.mark.cpu_test
+@pytest.mark.parametrize("method", ["dspine", "dflash"])
+def test_dspine_public_config_resolves_alias_architecture_and_width(method):
+    config = _make_speculative_config(
+        dict(
+            model_type="qwen3",
+            architectures=["DSpineDraftModel"],
+            vocab_size=256,
+            block_size=16,
+            dflash_config={
+                "selected_prefix_code_bridge": {"code_size": 32, "rank": 16},
+                "draft_block_causal": True,
+            },
+        ),
+        "DSpineDraftModel",
+        method=method,
+        enforce_eager=True,
+        draft_tensor_parallel_size=1,
+    )
+    assert config.method == "dflash"
+    assert config.num_speculative_tokens == 15
+    assert config.parallel_drafting
+    assert config.draft_model_config.hf_config.architectures == ["DSpineDraftModel"]
+    assert config.draft_model_config.hf_config.is_causal is True
+
+
+@pytest.mark.cpu_test
+def test_dspine_public_config_rejects_wrong_block_width():
+    with pytest.raises(ValueError, match="num_speculative_tokens must be 15"):
+        _make_speculative_config(
+            dict(
+                model_type="qwen3",
+                architectures=["DSpineDraftModel"],
+                vocab_size=256,
+                block_size=16,
+            ),
+            "DSpineDraftModel",
+            method="dspine",
+            num_speculative_tokens=7,
+            draft_tensor_parallel_size=1,
+        )
+
+
+@pytest.mark.cpu_test
 @pytest.mark.parametrize(
     ("hf_kwargs", "n_predict", "architecture"),
     [
