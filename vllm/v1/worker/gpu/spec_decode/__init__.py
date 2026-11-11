@@ -33,6 +33,12 @@ def init_speculator(
             )
 
             return XPressSpeculator(vllm_config, device)
+        if "DSpineDraftModel" in architectures:
+            from vllm.v1.worker.gpu.spec_decode.dspine.speculator import (
+                DSpineSpeculator,
+            )
+
+            return DSpineSpeculator(vllm_config, device)
         if "LiLiCorrDraftModel" in architectures:
             from vllm.v1.worker.gpu.spec_decode.lilicorr.speculator import (
                 LiLiCorrSpeculator,
