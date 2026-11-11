@@ -68,7 +68,7 @@ class DefaultModelState(ModelState):
         if (
             self.model_config.supports_multimodal_inputs
             and self.model_config.is_mm_prefix_lm
-        ):
+        ) or callable(getattr(self.model, "get_request_prefix_ranges", None)):
             self.mm_prefix_ranges = {}
 
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
@@ -83,6 +83,12 @@ class DefaultModelState(ModelState):
                 or getattr(hf_text_config, "mm_prefix_clamp_sliding_window", False),
                 span_pad=getattr(self.model, "mm_prefix_span_leading_pad_modulus", 0),
             )[0]
+        prefix_ranges = getattr(self.model, "get_request_prefix_ranges", None)
+        if prefix_ranges is not None:
+            ranges = prefix_ranges(new_req_data)
+            if ranges:
+                assert self.mm_prefix_ranges is not None
+                self.mm_prefix_ranges[new_req_data.req_id] = ranges
         if self.rope_state is not None:
             # `prompt_embeds` is a passthrough modality with no grid info, but
             # M-RoPE assumes per-feature grids. Filter it out.
@@ -177,6 +183,17 @@ class DefaultModelState(ModelState):
         positions = self.rope_state.get_positions(input_batch.num_tokens_after_padding)
         return {"positions": positions}
 
+    def get_mm_prefix_ranges(
+        self, input_batch: InputBatch
+    ) -> dict[int, list[tuple[int, int]]] | None:
+        """Read request-owned ranges in the current batch order on every PP rank."""
+        if self.mm_prefix_ranges is None:
+            return None
+        return {
+            i: self.mm_prefix_ranges.get(req_id, [])
+            for i, req_id in enumerate(input_batch.req_ids)
+        }
+
     def prepare_dummy_inputs(self, num_reqs: int, num_tokens: int) -> dict[str, Any]:
         model_inputs = {}
         if self.supports_mm_inputs or self.prompt_embeds_state is not None:
@@ -218,12 +235,7 @@ class DefaultModelState(ModelState):
             max_seq_len = self.max_model_len
         else:
             max_seq_len = seq_lens_cpu_upper_bound[:num_reqs].max().item()
-        req_doc_ranges: dict[int, list[tuple[int, int]]] | None = None
-        if self.mm_prefix_ranges is not None:
-            req_doc_ranges = {
-                i: self.mm_prefix_ranges.get(req_id, [])
-                for i, req_id in enumerate(input_batch.req_ids)
-            }
+        req_doc_ranges = self.get_mm_prefix_ranges(input_batch)
         dcp_local_seq_lens_cpu_upper_bound = None
         if input_batch.pcp is not None:
             dcp_local_seq_lens_cpu_upper_bound = (
