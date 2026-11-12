@@ -1064,6 +1064,13 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
                     name = remapped_name
                     if is_pp_missing_parameter(name, self):
                         continue
+                    # Some Kimi checkpoints retain quantization-only tensors
+                    # from a previous format even though the corresponding
+                    # projection is now stored unquantized. The quantization
+                    # config selects an unquantized linear method for that
+                    # projection, so it has no destination for the stale tensor.
+                    if name not in params_dict:
+                        continue
 
                     param = params_dict[name]
                     weight_loader = getattr(
