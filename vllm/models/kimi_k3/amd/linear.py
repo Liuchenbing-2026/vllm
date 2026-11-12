@@ -1064,13 +1064,34 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
                     name = remapped_name
                     if is_pp_missing_parameter(name, self):
                         continue
-                    # Some Kimi checkpoints retain quantization-only tensors
-                    # from a previous format even though the corresponding
-                    # projection is now stored unquantized. The quantization
-                    # config selects an unquantized linear method for that
-                    # projection, so it has no destination for the stale tensor.
-                    if name not in params_dict:
-                        continue
+                    # Some Kimi checkpoints retain quantization metadata next
+                    # to a projection that the current quantization config
+                    # stores unquantized. The projection may be direct or fused
+                    # (for example, ``v_proj`` becomes ``in_proj_qkvgfab``).
+                    # Only ignore stale metadata when that projection exists;
+                    # other missing names still indicate a mismatch.
+                    stale_aux_suffix = next(
+                        (
+                            suffix
+                            for suffix in (
+                                ".weight_offset",
+                                ".weight_scale",
+                                ".scale_bias",
+                            )
+                            if name.endswith(suffix)
+                        ),
+                        None,
+                    )
+                    if name not in params_dict and stale_aux_suffix is not None:
+                        projection_name = name.removesuffix(stale_aux_suffix)
+                        projection_params = {projection_name + ".weight"}
+                        projection_params.update(
+                            projection_name.replace(weight_name, param_name) + ".weight"
+                            for param_name, weight_name, _ in stacked_params_mapping
+                            if weight_name in projection_name
+                        )
+                        if projection_params & params_dict.keys():
+                            continue
 
                     param = params_dict[name]
                     weight_loader = getattr(
