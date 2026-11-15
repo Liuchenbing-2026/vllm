@@ -2,14 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """CPU regressions for last-token selection and FP32 decision head loading."""
 
+import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
 import torch
+from transformers import Qwen3_5Config
 
-from vllm.model_executor.models.config import StartLuxDecisionConfig
+from vllm.config import ModelConfig
 from vllm.model_executor.models.qwen3_5 import Qwen3_5ForConditionalGeneration
 from vllm.model_executor.models.startlux_decision import (
     StartLuxDecisionForSequenceClassification,
@@ -35,19 +37,41 @@ class TestStartLuxDecisionPooler(unittest.TestCase):
             (None, True),
             ("causal", True),
             ("bidirectional", False),
+            ("unknown", None),
         ]:
-            hf = SimpleNamespace()
-            if mode is not None:
-                hf.jev_prompt_attention = mode
-            text = SimpleNamespace(layer_types=["linear_attention", "full_attention"])
-            config = SimpleNamespace(hf_config=hf, hf_text_config=text)
-            StartLuxDecisionConfig.verify_and_update_model_config(config)
-            self.assertIs(hf.is_causal, expected)
-            self.assertIs(text.is_causal, expected)
-            self.assertEqual(text.layer_types, ["linear_attention", "full_attention"])
-        hf.jev_prompt_attention = "unknown"
-        with self.assertRaisesRegex(ValueError, "Unsupported StartLux"):
-            StartLuxDecisionConfig.verify_and_update_model_config(config)
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as model_dir:
+                hf = Qwen3_5Config(
+                    architectures=["StartLuxDecisionForSequenceClassification"],
+                    text_config={
+                        "num_hidden_layers": 2,
+                        "layer_types": ["linear_attention", "full_attention"],
+                    },
+                )
+                if mode is not None:
+                    hf.jev_prompt_attention = mode
+                hf.save_pretrained(model_dir)
+                kwargs = dict(
+                    model=model_dir,
+                    runner="pooling",
+                    skip_tokenizer_init=True,
+                    language_model_only=True,
+                    enforce_eager=True,
+                    max_model_len=128,
+                )
+                if expected is None:
+                    with self.assertRaisesRegex(ValueError, "Unsupported StartLux"):
+                        ModelConfig(**kwargs)
+                    continue
+                config = ModelConfig(**kwargs)
+                self.assertIs(config.hf_config.is_causal, expected)
+                self.assertIs(config.hf_text_config.is_causal, expected)
+                self.assertEqual(config.runner_type, "pooling")
+                self.assertEqual(
+                    config.hf_text_config.layer_types,
+                    ["linear_attention", "full_attention"],
+                )
+                if not expected:
+                    self.assertEqual(config.attn_type, "encoder_only")
 
     def test_last_positions_keep_raw_candidate_logits(self):
         # Nonconsecutive vocabulary rows catch TP-local/vocabulary index confusion.
