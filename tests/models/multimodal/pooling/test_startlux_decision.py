@@ -6,6 +6,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import numpy as np
 import torch
 
 from vllm.model_executor.models.config import StartLuxDecisionConfig
@@ -14,6 +15,8 @@ from vllm.model_executor.models.startlux_decision import (
     StartLuxDecisionForSequenceClassification,
     StartLuxDecisionPooler,
 )
+from vllm.pooling_params import PoolingParams
+from vllm.v1.pool.metadata import PoolingMetadata, PoolingStates
 
 
 class TestStartLuxDecisionPooler(unittest.TestCase):
@@ -51,17 +54,43 @@ class TestStartLuxDecisionPooler(unittest.TestCase):
         pooler = StartLuxDecisionPooler([1, 6, 3], 4)
         weight = torch.arange(32).reshape(8, 4).to(torch.bfloat16) / 7
         pooler.load_head(weight)
-        hidden = torch.arange(20).reshape(5, 4).to(torch.bfloat16) / 3
-        metadata = SimpleNamespace(
-            get_pooling_cursor=lambda: SimpleNamespace(
-                last_token_indices_gpu=torch.tensor([1, 4])
-            )
-        )
-        actual = pooler(hidden, metadata)
-        expected = hidden[[1, 4]].float() @ weight[[1, 6, 3]].float().T
-        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-        self.assertEqual(actual.dtype, torch.float32)
-        self.assertGreater(actual.max().item(), 1)  # No premature softmax.
+        for lengths, last_indices, padding in [
+            ([2, 3], [1, 4], 0),
+            ([1, 4, 2], [0, 4, 6], 3),
+            ([3], [2], 5),
+        ]:
+            with self.subTest(lengths=lengths, padding=padding):
+                num_tokens = sum(lengths)
+                hidden = (
+                    torch.arange((num_tokens + padding) * 4)
+                    .reshape(-1, 4)
+                    .to(torch.bfloat16)
+                    / 3
+                )
+                # Padding has a distinct value so selecting its final row
+                # cannot accidentally look like the last real prompt token.
+                hidden[num_tokens:] = 1000
+                metadata = PoolingMetadata(
+                    prompt_lens=torch.tensor(lengths),
+                    prompt_token_ids=None,
+                    prompt_token_ids_cpu=None,
+                    pooling_params=[
+                        PoolingParams(task="classify", use_activation=False)
+                        for _ in lengths
+                    ],
+                    pooling_states=[PoolingStates() for _ in lengths],
+                )
+                metadata.build_pooling_cursor(
+                    np.asarray(lengths, dtype=np.int32),
+                    torch.tensor(lengths),
+                    torch.device("cpu"),
+                )
+                actual = pooler(hidden, metadata)
+                expected = hidden[last_indices].float() @ weight[[1, 6, 3]].float().T
+                torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+                self.assertEqual(actual.dtype, torch.float32)
+                self.assertEqual(tuple(actual.shape), (len(lengths), 3))
+                self.assertGreater(actual.max().item(), 1)  # Raw logits.
 
     def test_tied_embeddings_and_untied_head_load_identically(self):
         class Model(StartLuxDecisionForSequenceClassification):
