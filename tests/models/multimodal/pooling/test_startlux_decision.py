@@ -4,20 +4,20 @@
 
 import tempfile
 import unittest
-from types import SimpleNamespace
-from unittest.mock import patch
 
 import numpy as np
+import pytest
 import torch
-from transformers import Qwen3_5Config
+from tokenizers import Tokenizer, models, pre_tokenizers
+from transformers import PreTrainedTokenizerFast, Qwen3_5Config
 
-from vllm.config import ModelConfig
-from vllm.model_executor.models.qwen3_5 import Qwen3_5ForConditionalGeneration
+from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
 from vllm.model_executor.models.startlux_decision import (
     StartLuxDecisionForSequenceClassification,
     StartLuxDecisionPooler,
 )
 from vllm.pooling_params import PoolingParams
+from vllm.utils.torch_utils import set_default_torch_dtype
 from vllm.v1.pool.metadata import PoolingMetadata, PoolingStates
 
 
@@ -116,34 +116,72 @@ class TestStartLuxDecisionPooler(unittest.TestCase):
                 self.assertEqual(tuple(actual.shape), (len(lengths), 3))
                 self.assertGreater(actual.max().item(), 1)  # Raw logits.
 
-    def test_tied_embeddings_and_untied_head_load_identically(self):
-        class Model(StartLuxDecisionForSequenceClassification):
-            def __init__(self, tied):
-                torch.nn.Module.__init__(self)
-                self.config = SimpleNamespace(
-                    get_text_config=lambda: SimpleNamespace(tie_word_embeddings=tied)
-                )
-                self.pooler = StartLuxDecisionPooler([1, 3], 2)
 
-        weight = torch.arange(10).reshape(5, 2).to(torch.bfloat16)
-        loader = patch.object(
-            Qwen3_5ForConditionalGeneration,
-            "load_weights",
-            lambda self, weights: {name for name, _ in weights},
+@pytest.mark.parametrize("tied", [False, True])
+def test_real_constructor_head_loading(tmp_path, dist_init, tied):
+    vocab = {"[UNK]": 0}
+    vocab.update(
+        {letter: i + 1 for i, letter in enumerate("ABCDEFGHIJKLMNOPQRSTUVWXYZ")}
+    )
+    vocab.update({f"extra_{i}": i for i in range(27, 64)})
+    tokenizer = Tokenizer(models.WordLevel(vocab, unk_token="[UNK]"))
+    tokenizer.pre_tokenizer = pre_tokenizers.Whitespace()
+    PreTrainedTokenizerFast(
+        tokenizer_object=tokenizer, unk_token="[UNK]"
+    ).save_pretrained(tmp_path)
+    Qwen3_5Config(
+        architectures=["StartLuxDecisionForSequenceClassification"],
+        text_config=dict(
+            vocab_size=64,
+            hidden_size=16,
+            intermediate_size=32,
+            num_hidden_layers=1,
+            num_attention_heads=4,
+            num_key_value_heads=4,
+            head_dim=4,
+            layer_types=["full_attention"],
+            tie_word_embeddings=tied,
+        ),
+        vision_config=dict(
+            depth=1,
+            hidden_size=16,
+            intermediate_size=32,
+            num_heads=4,
+            out_hidden_size=16,
+            deepstack_visual_indexes=[],
+        ),
+    ).save_pretrained(tmp_path)
+    model_config = ModelConfig(
+        model=str(tmp_path),
+        runner="pooling",
+        language_model_only=True,
+        dtype="bfloat16",
+        enforce_eager=True,
+        max_model_len=128,
+    )
+    config = VllmConfig(model_config=model_config)
+    with set_default_torch_dtype(model_config.dtype), set_current_vllm_config(config):
+        model = StartLuxDecisionForSequenceClassification(vllm_config=config)
+        weight = torch.arange(64 * 16).reshape(64, 16).to(torch.bfloat16)
+        name = "model.language_model.embed_tokens.weight" if tied else "lm_head.weight"
+        mapped = (
+            "language_model.model.embed_tokens.weight"
+            if tied
+            else "language_model.lm_head.weight"
         )
-        loader.start()
-        self.addCleanup(loader.stop)
-        for tied, name in [
-            (True, "model.language_model.embed_tokens.weight"),
-            (False, "lm_head.weight"),
-        ]:
-            model = Model(tied)
-            self.assertEqual(model.load_weights(iter([(name, weight)])), {name})
-            torch.testing.assert_close(
-                model.pooler.letter_weight, weight[[1, 3]].float()
-            )
-        with self.assertRaisesRegex(ValueError, "no StartLux output head"):
-            Model(False).load_weights(iter([("other.weight", weight)]))
+        loaded = model.load_weights(iter([(name, weight)]))
+        assert mapped in loaded
+        torch.testing.assert_close(
+            model.pooler.letter_weight, weight[1:27].float(), rtol=0, atol=0
+        )
+        parameter = (
+            model.language_model.model.embed_tokens.weight
+            if tied
+            else model.language_model.lm_head.weight
+        )
+        torch.testing.assert_close(parameter[:64], weight, rtol=0, atol=0)
+        with pytest.raises(ValueError, match="no StartLux output head"):
+            model.load_weights(iter([]))
 
 
 if __name__ == "__main__":
