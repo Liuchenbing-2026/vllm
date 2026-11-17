@@ -14,6 +14,10 @@ used for classification and routing.
 | `Gemma4ForCausalLM`       | `NextTokenStrategy` | `generate`       | N/A               | `google/gemma-4-E2B-it` |
 | `Qwen3ForCausalLM`        | `NextTokenStrategy` | `generate`       | N/A               | `Qwen/Qwen3-0.6B`, etc. |
 
+For StartLux v1 and v1.1 Instant text pooling and the native `/v1/decisions`
+interface, see [StartLux decision pooling](./startlux_decision.md). This path
+does not implement AutoThink or multimodal reads.
+
 ### Multimodal Models
 
 !!! note

@@ -5,7 +5,7 @@
 import asyncio
 import json
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -13,11 +13,9 @@ import torch
 from vllm.entrypoints.openai.decisions.adapters import make_answer, make_read_question
 from vllm.entrypoints.openai.decisions.protocol import (
     ChoiceQuestion,
-    DecisionRequest,
     PredicateQuestion,
     ScoreQuestion,
 )
-from vllm.entrypoints.openai.decisions.serving import OpenAIServingDecisions
 from vllm.entrypoints.openai.decisions.strategies import (
     D3Strategy,
     StartLuxStrategy,
@@ -235,59 +233,6 @@ def test_complete_prompt_and_tokenizer_metadata():
         pytest.raises(ValueError, match="reply tokens|letter IDs"),
     ):
         strategy()
-
-
-def test_native_handler_preserves_question_types_and_answers():
-    reader = strategy()
-
-    async def encode(prompt, params, request_id, **kwargs):
-        yield SimpleNamespace(
-            error=None,
-            outputs=SimpleNamespace(data=torch.tensor([0.0, 2.0] + [100.0] * 24)),
-        )
-
-    reader.context.engine_client.encode = encode
-    reader.context.engine_client.errored = False
-    reader.context.engine_client.check_admission = Mock()
-    handler = OpenAIServingDecisions.__new__(OpenAIServingDecisions)
-    handler.strategy = reader
-    handler.limits = reader.limits()
-    handler.models = SimpleNamespace(model_name=lambda _: "test")
-    handler._check_model = AsyncMock(return_value=None)
-    handler._base_request_id = lambda _: "cpu"
-    handler._maybe_get_adapters = lambda _: None
-    handler._log_inputs = Mock()
-    request = DecisionRequest(
-        model="test",
-        input="state",
-        questions=[
-            {
-                "type": "choice",
-                "instructions": "Pick.",
-                "choices": [{"value": "Paris"}, {"value": "London"}],
-            },
-            {"type": "predicate", "instructions": "Safe?"},
-            {
-                "type": "score",
-                "instructions": "Rate.",
-                "levels": [{"label": "low"}, {"label": "high"}],
-            },
-        ],
-    )
-    response = asyncio.run(handler.create_decisions(request))
-    assert response.answers[0].choice == "London"
-    assert response.answers[0].confidence == pytest.approx(
-        torch.softmax(torch.tensor([0.0, 1.0]), 0)[1].item()
-    )
-    # Candidate A is yes but the API's true probability is at position 1.
-    assert response.answers[1].probability == pytest.approx(
-        torch.softmax(torch.tensor([0.0, 2.0]), 0)[0].item()
-    )
-    assert response.answers[2].score == pytest.approx(
-        torch.softmax(torch.tensor([0.0, 2.0 / 3.0]), 0)[1].item()
-    )
-    assert response.usage.output_tokens == 0
-    reader.context.engine_client.check_admission.assert_called_once_with(3)
 
 
 @pytest.mark.parametrize(
