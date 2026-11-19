@@ -133,7 +133,7 @@ class GreedyDualSizeEviction:
             i for i, g in enumerate(groups) if isinstance(g.kv_cache_spec, MambaSpec)
         )
         self.every = tuple(range(len(groups)))
-        self.page_groups = tuple(i for i in self.every if i not in self.mamba)
+        self.page_groups = tuple(frontiers.pages)
         self.clock = 0.0
         # Unit key -> the page keys of the full blocks before it.
         self.paths: dict[BlockHash, tuple[BlockHash, ...]] = {}

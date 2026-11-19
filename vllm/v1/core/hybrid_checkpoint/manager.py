@@ -25,7 +25,11 @@ from typing import TYPE_CHECKING, Any
 
 from vllm.v1.core.hybrid_checkpoint.cost import PrefillCostModel
 from vllm.v1.core.hybrid_checkpoint.eviction import GreedyDualSizeEviction
-from vllm.v1.core.hybrid_checkpoint.frontier import FrontierIndex, HitBlocks
+from vllm.v1.core.hybrid_checkpoint.frontier import (
+    PUBLISHABLE_FINISH_STATUSES,
+    FrontierIndex,
+    HitBlocks,
+)
 from vllm.v1.core.hybrid_checkpoint.units import CheckpointGraph
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
@@ -65,11 +69,8 @@ def layout_groups(
     states: list[int] = []
     rings: list[int] = []
     for group_id, manager in enumerate(coordinator.single_type_managers):
-        if type(manager) is FullAttentionManager:
-            pages.append(group_id)
-        elif type(manager) is MambaManager:
-            states.append(group_id)
-        elif type(manager) is CircularBufferManager:
+        # CircularBufferManager subclasses FullAttentionManager.
+        if isinstance(manager, CircularBufferManager):
             spec = manager.kv_cache_spec
             assert isinstance(spec, CircularBufferSpec)
             if spec.resume_catchup is None:
@@ -78,6 +79,10 @@ def layout_groups(
                     f"declare resume_catchup; group {group_id} does not"
                 )
             rings.append(group_id)
+        elif isinstance(manager, MambaManager):
+            states.append(group_id)
+        elif isinstance(manager, FullAttentionManager):
+            pages.append(group_id)
         else:
             raise ValueError(
                 "mamba_frontier_checkpoint supports full-attention, Mamba and "
@@ -513,7 +518,9 @@ class HybridCheckpointManager:
         every Mamba group, or in none, and free the scratch blocks."""
         sources = [_decode_boundary(m, request) for m in self.mamba_managers]
         complete = (
-            bool(sources)
+            not request.resumable
+            and request.status in PUBLISHABLE_FINISH_STATUSES
+            and bool(sources)
             and all(source is not None for source in sources)
             and len({source[1] for source in sources if source is not None}) == 1
         )

@@ -40,6 +40,12 @@ if TYPE_CHECKING:
 # hashes only candidates that already end like the request.
 _SUFFIX = 8
 
+PUBLISHABLE_FINISH_STATUSES = (
+    RequestStatus.FINISHED_STOPPED,
+    RequestStatus.FINISHED_LENGTH_CAPPED,
+    RequestStatus.FINISHED_REPETITION,
+)
+
 HitBlocks = tuple[list[KVCacheBlock], ...]
 
 
@@ -113,7 +119,7 @@ class FrontierIndex:
             num_tokens == 0
             or num_tokens % self.block_size == 0
             or request.resumable
-            or request.status == RequestStatus.FINISHED_ABORTED
+            or request.status not in PUBLISHABLE_FINISH_STATUSES
             # An input token of a dispatched step is not known yet.
             or request.num_tokens < num_tokens
         ):

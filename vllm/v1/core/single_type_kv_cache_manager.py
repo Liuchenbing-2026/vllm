@@ -1207,8 +1207,29 @@ class CircularBufferManager(FullAttentionManager):
 
     supports_fine_grained_hash_lookup: ClassVar[bool] = False
 
-    def __init__(self, kv_cache_spec: CircularBufferSpec, **kwargs) -> None:
-        super().__init__(kv_cache_spec, **kwargs)
+    def __init__(
+        self,
+        kv_cache_spec: CircularBufferSpec,
+        block_pool: BlockPool,
+        enable_caching: bool,
+        kv_cache_group_id: int,
+        scheduler_block_size: int,
+        dcp_world_size: int = 1,
+        pcp_world_size: int = 1,
+        needs_kv_cache_zeroing: bool = False,
+        max_admission_blocks_per_request: int | None = None,
+    ) -> None:
+        super().__init__(
+            kv_cache_spec=kv_cache_spec,
+            block_pool=block_pool,
+            enable_caching=enable_caching,
+            kv_cache_group_id=kv_cache_group_id,
+            scheduler_block_size=scheduler_block_size,
+            dcp_world_size=dcp_world_size,
+            pcp_world_size=pcp_world_size,
+            needs_kv_cache_zeroing=needs_kv_cache_zeroing,
+            max_admission_blocks_per_request=max_admission_blocks_per_request,
+        )
         # Set when Mamba frontier checkpoints are on.
         self.takes_frontier_hits = False
         self._ring_hits: dict[str, KVCacheBlock] = {}

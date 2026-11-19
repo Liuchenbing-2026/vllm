@@ -60,7 +60,7 @@ A request's output can cross block boundaries, where `align` mode caches no stat
 
 ### Session leaves
 
-When a request finishes, the newest state it published becomes its session's leaf. The leaf it resumed from is released, unless that leaf is a branch point, a running request still holds its state, or a waiting request resumes there: its lookup did, or under GreedyDual-Size its hit pins it. A frontier that differs from the request only in its last token, such as a stop token the client replaced, is released too. An aborted request publishes no frontier, because its last state may come from a step or a load that never completed.
+When a request finishes, the newest state it published becomes its session's leaf. The leaf it resumed from is released, unless that leaf is a branch point, a running request still holds its state, or a waiting request resumes there: its lookup did, or under GreedyDual-Size its hit pins it. A frontier that differs from the request only in its last token, such as a stop token the client replaced, is released too. An aborted or failed request publishes no frontier or decode-boundary state, because its last state may come from a step or a load that never completed.
 
 ### Indexer rings
 

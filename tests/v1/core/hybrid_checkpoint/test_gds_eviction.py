@@ -439,3 +439,85 @@ def test_evicting_a_frontier_keeps_the_page_key_of_a_finer_hash_unit():
     tokens = list(first.all_token_ids[:150]) + prompt(3, 30)
     probe = add_request(scheduler, "p", tokens, max_tokens=1)
     assert admitted_at(scheduler, probe) == 150 // unit * unit
+
+
+@pytest.mark.parametrize(
+    "cost",
+    [
+        (float("nan"), 0.0),
+        (float("inf"), 0.0),
+        (1e-5, float("nan")),
+        (1e-5, float("inf")),
+    ],
+)
+def test_nonfinite_cost_is_rejected_before_eviction(cost):
+    with pytest.raises(ValueError, match="both finite"):
+        CacheConfig(prefill_cost_coefficients=cost)
+
+
+@pytest.mark.parametrize("idle", [float("nan"), float("inf"), float("-inf")])
+def test_nonfinite_leaf_idle_seconds_is_rejected(idle):
+    with pytest.raises(ValueError, match="must be finite"):
+        CacheConfig(
+            mamba_frontier_checkpoint=True,
+            prefix_cache_eviction="gds",
+            prefill_cost_coefficients=COST,
+            prefix_cache_leaf_last=True,
+            prefix_cache_leaf_idle_seconds=idle,
+        )
+
+
+@pytest.mark.parametrize(
+    "field_name", ["mamba_frontier_checkpoint", "prefix_cache_leaf_last"]
+)
+@pytest.mark.parametrize("bad", ["true", "false", 1, 0])
+def test_frontier_switches_require_boolean(field_name, bad):
+    kwargs: dict = {field_name: bad}
+    if field_name == "prefix_cache_leaf_last":
+        kwargs.update(
+            mamba_frontier_checkpoint=True,
+            prefix_cache_eviction="gds",
+            prefill_cost_coefficients=COST,
+        )
+    with pytest.raises(ValueError):
+        CacheConfig(**kwargs)
+
+
+def test_gds_page_groups_exclude_indexer_rings():
+    scheduler = make_hybrid_scheduler(
+        block_size=BLOCK,
+        num_blocks=40,
+        max_num_batched_tokens=1024,
+        ring=4,
+        mamba_frontier_checkpoint=True,
+        prefix_cache_eviction="gds",
+        prefill_cost_coefficients=COST,
+    )
+    checkpoints = scheduler.kv_cache_manager.checkpoints
+    assert checkpoints is not None
+    assert checkpoints.eviction is not None
+    assert checkpoints.frontiers.rings
+    assert checkpoints.eviction.page_groups == tuple(checkpoints.frontiers.pages)
+    assert set(checkpoints.eviction.page_groups).isdisjoint(
+        checkpoints.frontiers.rings
+    )
+    first = add_request(scheduler, "r1", prompt(1, 150), max_tokens=2)
+    run(scheduler, first)
+    cont = add_request(
+        scheduler,
+        "r2",
+        list(first.all_token_ids[: first.num_computed_tokens]) + prompt(2, 10),
+        max_tokens=1,
+    )
+    assert admitted_at(scheduler, cont) == first.num_computed_tokens
+
+
+def test_engine_args_frontier_defaults_are_resolved():
+    from vllm.engine.arg_utils import EngineArgs
+
+    assert CacheConfig.mamba_frontier_checkpoint is False
+    assert CacheConfig.prefix_cache_leaf_last is False
+    args = EngineArgs()
+    assert args.mamba_frontier_checkpoint is False
+    assert args.prefix_cache_leaf_last is False
+    assert args.prefix_cache_leaf_idle_seconds is None

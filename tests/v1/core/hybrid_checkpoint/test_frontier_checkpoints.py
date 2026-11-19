@@ -320,3 +320,137 @@ def test_kv_cache_events_are_refused():
     kv_events_config = KVEventsConfig(enable_kv_cache_events=True, publisher="null")
     with pytest.raises(ValueError, match="needs no KV cache events"):
         make_scheduler(kv_events_config=kv_events_config)
+
+
+def test_hardware_manager_subclasses_keep_checkpoint_group_roles():
+    from types import SimpleNamespace
+
+    from vllm.v1.core.hybrid_checkpoint.manager import layout_groups
+    from vllm.v1.core.single_type_kv_cache_manager import (
+        CircularBufferManager,
+        FullAttentionManager,
+        MambaManager,
+    )
+
+    class CustomPageManager(FullAttentionManager):
+        pass
+
+    class CustomMambaManager(MambaManager):
+        pass
+
+    class CustomRingManager(CircularBufferManager):
+        pass
+
+    scheduler = make_scheduler()
+    pool = scheduler.kv_cache_manager.block_pool
+    subclasses = {
+        CircularBufferManager: CustomRingManager,
+        MambaManager: CustomMambaManager,
+        FullAttentionManager: CustomPageManager,
+    }
+    cloned = []
+    expected_pages: list[int] = []
+    expected_states: list[int] = []
+    expected_rings: list[int] = []
+    for idx, manager in enumerate(
+        scheduler.kv_cache_manager.coordinator.single_type_managers
+    ):
+        for base, sub_cls in subclasses.items():
+            if isinstance(manager, base):
+                cloned.append(
+                    sub_cls(
+                        manager.kv_cache_spec,
+                        pool,
+                        enable_caching=manager.enable_caching,
+                        kv_cache_group_id=idx,
+                        scheduler_block_size=manager.scheduler_block_size,
+                    )
+                )
+                if base is CircularBufferManager:
+                    expected_rings.append(idx)
+                elif base is MambaManager:
+                    expected_states.append(idx)
+                else:
+                    expected_pages.append(idx)
+                break
+        else:
+            raise AssertionError(f"Unexpected manager type: {type(manager)}")
+
+    pages, states, rings = layout_groups(SimpleNamespace(single_type_managers=cloned))
+    assert (pages, states, rings) == (
+        expected_pages,
+        expected_states,
+        expected_rings,
+    )
+
+
+def test_real_frontier_lookup_does_not_cross_request_limit():
+    from tests.v1.core.hybrid_checkpoint.utils import (
+        add_request,
+        admitted_at,
+        make_request,
+        prompt,
+        run,
+    )
+
+    scheduler = make_scheduler()
+    block = scheduler.block_size
+    r1 = add_request(scheduler, "r1", prompt(1, block + 3), max_tokens=1)
+    run(scheduler, r1)
+    frontier_len = r1.num_computed_tokens
+    assert frontier_len == block + 3
+
+    # Exact-length prompt must still recompute its last token.
+    exact = add_request(
+        scheduler, "exact", list(r1.all_token_ids[:frontier_len]), max_tokens=1
+    )
+    assert admitted_at(scheduler, exact) < frontier_len
+
+    longer = make_request(
+        scheduler,
+        "longer",
+        list(r1.all_token_ids[:frontier_len]) + prompt(2, 5),
+        max_tokens=1,
+    )
+    _, limited_hit, _ = scheduler.kv_cache_manager.get_computed_blocks(
+        longer, max_cache_hit_length=frontier_len - 1
+    )
+    assert limited_hit <= frontier_len - 1
+    _, full_hit, _ = scheduler.kv_cache_manager.get_computed_blocks(longer)
+    assert full_hit == frontier_len
+
+
+@pytest.mark.parametrize("status_name", ["FINISHED_ABORTED", "FINISHED_ERROR"])
+@pytest.mark.parametrize("at_boundary", [False, True])
+def test_failed_inflight_step_never_publishes_recovery_state(
+    status_name, at_boundary
+):
+    from tests.v1.core.hybrid_checkpoint.utils import (
+        add_request,
+        admitted_at,
+        prompt,
+        step,
+    )
+    from vllm.v1.request import RequestStatus
+
+    scheduler = make_scheduler()
+    block = scheduler.block_size
+    req = add_request(scheduler, "r", prompt(1, block - 2), max_tokens=8)
+    target_len = block if at_boundary else block + 1
+    while req.num_computed_tokens < target_len:
+        step(scheduler)
+
+    scheduler.finish_requests(req.request_id, getattr(RequestStatus, status_name))
+    checkpoints = scheduler.kv_cache_manager.checkpoints
+    assert checkpoints.frontiers.num_published == 0
+    assert all(
+        req.request_id not in m.decode_boundary_scratch
+        for m in checkpoints.mamba_managers
+    )
+    cont = add_request(
+        scheduler,
+        "cont",
+        list(req.all_token_ids[:target_len]) + prompt(2, 5),
+        max_tokens=1,
+    )
+    assert admitted_at(scheduler, cont) == 0

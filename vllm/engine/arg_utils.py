@@ -834,8 +834,8 @@ class EngineArgs:
     mamba_frontier_checkpoint: bool = CacheConfig.mamba_frontier_checkpoint
     prefix_cache_eviction: PrefixCacheEviction = CacheConfig.prefix_cache_eviction
     prefix_cache_leaf_last: bool = CacheConfig.prefix_cache_leaf_last
-    prefix_cache_leaf_idle_seconds: float | None = (
-        CacheConfig.prefix_cache_leaf_idle_seconds
+    prefix_cache_leaf_idle_seconds: float | None = get_field(
+        CacheConfig, "prefix_cache_leaf_idle_seconds"
     )
     prefill_cost_coefficients: tuple[float, float] | None = (
         CacheConfig.prefill_cost_coefficients

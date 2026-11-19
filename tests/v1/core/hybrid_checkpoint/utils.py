@@ -5,7 +5,6 @@ indexer ring) and a step driver for CPU tests of hybrid state checkpoints."""
 
 from typing import Any, Literal
 
-import pytest
 import torch
 
 from tests.v1.kv_connector.unit.utils import MockKVConnector
@@ -157,19 +156,15 @@ def make_hybrid_scheduler(
         num_blocks=num_blocks, kv_cache_tensors=[], kv_cache_groups=groups
     )
     register_all_kvcache_specs(vllm_config)
-    # The checkpoint features need Model Runner V2, which CPU builds select
-    # only when asked to.
     scheduler_cls = AsyncScheduler if async_scheduling else Scheduler
-    with pytest.MonkeyPatch.context() as m:
-        m.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
-        return scheduler_cls(
-            vllm_config=vllm_config,
-            kv_cache_config=kv_cache_config,
-            structured_output_manager=StructuredOutputManager(vllm_config),
-            block_size=block_size,
-            hash_block_size=hash_block_size or block_size,
-            log_stats=True,
-        )
+    return scheduler_cls(
+        vllm_config=vllm_config,
+        kv_cache_config=kv_cache_config,
+        structured_output_manager=StructuredOutputManager(vllm_config),
+        block_size=block_size,
+        hash_block_size=hash_block_size or block_size,
+        log_stats=True,
+    )
 
 
 def prompt(seed: int, num_tokens: int) -> list[int]:

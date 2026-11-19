@@ -4,6 +4,7 @@
 from collections.abc import Callable
 from dataclasses import field
 from functools import cache
+from math import isfinite
 from typing import Any, ClassVar, Literal, Protocol, get_args, runtime_checkable
 
 import torch
@@ -334,7 +335,7 @@ class CacheConfig:
     block boundary of its prompt. A resumed state's partial attention page and
     recurrent state are copied, and the frontier checkpoint is dropped whole
     when any of its blocks is evicted. Requires prefix caching with Mamba
-    "align" mode, Model Runner V2 and `prefix_cache_retention_interval` 0; a
+    "align" mode and `prefix_cache_retention_interval` 0; a
     `prefix_match_unit` may be smaller than the block size. A KV connector
     needs `kv_role` "kv_both" and `kv_load_failure_policy` "recompute". Not
     supported with speculative decoding, KV cache events or context
@@ -524,6 +525,17 @@ class CacheConfig:
             return value
         return handler(value)
 
+    @field_validator(
+        "mamba_frontier_checkpoint", "prefix_cache_leaf_last", mode="before"
+    )
+    @classmethod
+    def _require_bool_frontier_flags(cls, value: Any) -> bool:
+        if not isinstance(value, bool):
+            raise ValueError(
+                f"Expected bool, got {type(value).__name__}: {value!r}"
+            )
+        return value
+
     @model_validator(mode="after")
     def _apply_block_size_default(self) -> "CacheConfig":
         # Pydantic re-runs validators when CacheConfig is nested inside
@@ -568,12 +580,25 @@ class CacheConfig:
             raise ValueError(
                 "prefix_cache_leaf_idle_seconds requires prefix_cache_leaf_last"
             )
+        if (
+            self.prefix_cache_leaf_idle_seconds is not None
+            and not isfinite(self.prefix_cache_leaf_idle_seconds)
+        ):
+            raise ValueError(
+                "prefix_cache_leaf_idle_seconds must be finite, "
+                f"got {self.prefix_cache_leaf_idle_seconds}"
+            )
         if self.prefill_cost_coefficients is not None:
             per_token, per_token_per_100k = self.prefill_cost_coefficients
-            if not (per_token > 0 and per_token_per_100k >= 0):
+            if not (
+                isfinite(per_token)
+                and isfinite(per_token_per_100k)
+                and per_token > 0
+                and per_token_per_100k >= 0
+            ):
                 raise ValueError(
                     "prefill_cost_coefficients (d, e) need d > 0 and e >= 0, "
-                    f"got {self.prefill_cost_coefficients}"
+                    f"both finite, got {self.prefill_cost_coefficients}"
                 )
         return self
 
