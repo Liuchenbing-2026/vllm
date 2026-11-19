@@ -467,6 +467,18 @@ def test_nonfinite_leaf_idle_seconds_is_rejected(idle):
         )
 
 
+@pytest.mark.parametrize("idle", [0.0, -1.0])
+def test_nonpositive_leaf_idle_seconds_is_rejected(idle):
+    with pytest.raises(ValueError, match="must be > 0"):
+        CacheConfig(
+            mamba_frontier_checkpoint=True,
+            prefix_cache_eviction="gds",
+            prefill_cost_coefficients=COST,
+            prefix_cache_leaf_last=True,
+            prefix_cache_leaf_idle_seconds=idle,
+        )
+
+
 @pytest.mark.parametrize(
     "field_name", ["mamba_frontier_checkpoint", "prefix_cache_leaf_last"]
 )
@@ -498,9 +510,7 @@ def test_gds_page_groups_exclude_indexer_rings():
     assert checkpoints.eviction is not None
     assert checkpoints.frontiers.rings
     assert checkpoints.eviction.page_groups == tuple(checkpoints.frontiers.pages)
-    assert set(checkpoints.eviction.page_groups).isdisjoint(
-        checkpoints.frontiers.rings
-    )
+    assert set(checkpoints.eviction.page_groups).isdisjoint(checkpoints.frontiers.rings)
     first = add_request(scheduler, "r1", prompt(1, 150), max_tokens=2)
     run(scheduler, first)
     cont = add_request(

@@ -84,6 +84,7 @@ def make_hybrid_scheduler(
     speculative_config: SpeculativeConfig | None = None,
     async_scheduling: bool = False,
     kv_events_config: KVEventsConfig | None = None,
+    kv_retention_interval: int | None = None,
     **cache_kwargs: Any,
 ) -> Scheduler:
     """`cache_kwargs` are CacheConfig fields; `ring` 0 builds no ring."""
@@ -153,7 +154,10 @@ def make_hybrid_scheduler(
             )
         )
     kv_cache_config = KVCacheConfig(
-        num_blocks=num_blocks, kv_cache_tensors=[], kv_cache_groups=groups
+        num_blocks=num_blocks,
+        kv_cache_tensors=[],
+        kv_cache_groups=groups,
+        prefix_cache_retention_interval=kv_retention_interval,
     )
     register_all_kvcache_specs(vllm_config)
     scheduler_cls = AsyncScheduler if async_scheduling else Scheduler

@@ -360,7 +360,7 @@ class CacheConfig:
     with a deeper cached state on its path (the block-boundary state under a
     frontier, an earlier turn's state) is inner unless it is a branch point;
     GreedyDual-Size orders each tier, and `L` rises only when a leaf goes."""
-    prefix_cache_leaf_idle_seconds: float | None = Field(default=None, gt=0)
+    prefix_cache_leaf_idle_seconds: float | None = None
     """With `prefix_cache_leaf_last`, a leaf that is not a branch point and
     was not used for this many seconds ranks as an inner state."""
     replayssm_buffer_len: int = Field(default=16, gt=0)
@@ -531,9 +531,7 @@ class CacheConfig:
     @classmethod
     def _require_bool_frontier_flags(cls, value: Any) -> bool:
         if not isinstance(value, bool):
-            raise ValueError(
-                f"Expected bool, got {type(value).__name__}: {value!r}"
-            )
+            raise ValueError(f"Expected bool, got {type(value).__name__}: {value!r}")
         return value
 
     @model_validator(mode="after")
@@ -573,21 +571,21 @@ class CacheConfig:
             raise ValueError(
                 'prefix_cache_leaf_last requires prefix_cache_eviction="gds"'
             )
-        if (
-            self.prefix_cache_leaf_idle_seconds is not None
-            and not self.prefix_cache_leaf_last
-        ):
-            raise ValueError(
-                "prefix_cache_leaf_idle_seconds requires prefix_cache_leaf_last"
-            )
-        if (
-            self.prefix_cache_leaf_idle_seconds is not None
-            and not isfinite(self.prefix_cache_leaf_idle_seconds)
-        ):
-            raise ValueError(
-                "prefix_cache_leaf_idle_seconds must be finite, "
-                f"got {self.prefix_cache_leaf_idle_seconds}"
-            )
+        if self.prefix_cache_leaf_idle_seconds is not None:
+            if not self.prefix_cache_leaf_last:
+                raise ValueError(
+                    "prefix_cache_leaf_idle_seconds requires prefix_cache_leaf_last"
+                )
+            if not isfinite(self.prefix_cache_leaf_idle_seconds):
+                raise ValueError(
+                    "prefix_cache_leaf_idle_seconds must be finite, "
+                    f"got {self.prefix_cache_leaf_idle_seconds}"
+                )
+            if self.prefix_cache_leaf_idle_seconds <= 0:
+                raise ValueError(
+                    "prefix_cache_leaf_idle_seconds must be > 0, "
+                    f"got {self.prefix_cache_leaf_idle_seconds}"
+                )
         if self.prefill_cost_coefficients is not None:
             per_token, per_token_per_100k = self.prefill_cost_coefficients
             if not (

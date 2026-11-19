@@ -422,9 +422,7 @@ def test_real_frontier_lookup_does_not_cross_request_limit():
 
 @pytest.mark.parametrize("status_name", ["FINISHED_ABORTED", "FINISHED_ERROR"])
 @pytest.mark.parametrize("at_boundary", [False, True])
-def test_failed_inflight_step_never_publishes_recovery_state(
-    status_name, at_boundary
-):
+def test_failed_inflight_step_never_publishes_recovery_state(status_name, at_boundary):
     from tests.v1.core.hybrid_checkpoint.utils import (
         add_request,
         admitted_at,
@@ -433,7 +431,7 @@ def test_failed_inflight_step_never_publishes_recovery_state(
     )
     from vllm.v1.request import RequestStatus
 
-    scheduler = make_scheduler()
+    scheduler = make_scheduler(kv_retention_interval=0)
     block = scheduler.block_size
     req = add_request(scheduler, "r", prompt(1, block - 2), max_tokens=8)
     target_len = block if at_boundary else block + 1
@@ -454,3 +452,30 @@ def test_failed_inflight_step_never_publishes_recovery_state(
         max_tokens=1,
     )
     assert admitted_at(scheduler, cont) == 0
+
+
+@pytest.mark.parametrize("at_boundary", [False, True])
+def test_normal_finish_publishes_decode_boundary_under_zero_retention(at_boundary):
+    from tests.v1.core.hybrid_checkpoint.utils import (
+        add_request,
+        admitted_at,
+        prompt,
+        step,
+    )
+    from vllm.v1.request import RequestStatus
+
+    scheduler = make_scheduler(kv_retention_interval=0)
+    block = scheduler.block_size
+    req = add_request(scheduler, "r", prompt(1, block - 2), max_tokens=8)
+    target_len = block if at_boundary else block + 1
+    while req.num_computed_tokens < target_len:
+        step(scheduler)
+
+    scheduler.finish_requests(req.request_id, RequestStatus.FINISHED_STOPPED)
+    cont = add_request(
+        scheduler,
+        "cont",
+        list(req.all_token_ids[:target_len]) + prompt(2, 5),
+        max_tokens=1,
+    )
+    assert admitted_at(scheduler, cont) == target_len
