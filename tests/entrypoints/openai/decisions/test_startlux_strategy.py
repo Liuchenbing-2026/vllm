@@ -28,6 +28,7 @@ from vllm.entrypoints.openai.decisions.strategies import (
     StructuredDecisionError,
     select_read_strategy,
 )
+from vllm.outputs import PoolingOutput, PoolingRequestOutput
 
 
 class Tokenizer:
@@ -143,9 +144,12 @@ def test_native_read_restricts_candidates_then_calibrates():
         assert params.extra_kwargs is None
         # Excluded labels dominate the full vocabulary: normalization must only
         # include the current question's two candidates.
-        yield SimpleNamespace(
-            error=None,
-            outputs=SimpleNamespace(data=torch.tensor([0.0, 2.0] + [100.0] * 24)),
+        yield PoolingRequestOutput(
+            request_id=request_id,
+            outputs=PoolingOutput(data=torch.tensor([0.0, 2.0] + [100.0] * 24)),
+            prompt_token_ids=prompt["prompt_token_ids"],
+            num_cached_tokens=0,
+            finished=True,
         )
 
     reader.context.engine_client.encode = encode
