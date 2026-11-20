@@ -16,6 +16,12 @@ from vllm.entrypoints.openai.decisions.protocol import (
     PredicateQuestion,
     ScoreQuestion,
 )
+from vllm.entrypoints.openai.decisions.question_types import (
+    LABELS,
+    Option,
+    Question,
+    get_question_type,
+)
 from vllm.entrypoints.openai.decisions.strategies import (
     D3Strategy,
     StartLuxStrategy,
@@ -36,14 +42,15 @@ class Tokenizer:
 
 
 def question(kind, names, descriptions=None, instructions="Choose."):
-    return SimpleNamespace(
+    return Question(
         id="q",
-        type=SimpleNamespace(name=kind),
+        type=get_question_type(kind),
         instructions=instructions,
         options=tuple(
-            SimpleNamespace(name=name, description=description)
+            Option(name=name, description=description)
             for name, description in zip(names, descriptions or [None] * len(names))
         ),
+        labels=LABELS[: len(names)],
     )
 
 
