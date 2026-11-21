@@ -25,10 +25,11 @@ config = json.loads((root / "encoder/config.json").read_text())
 tokenizer = AutoTokenizer.from_pretrained(root / "tokenizer")
 config.update({
     key: settings[key]
-    for key in ("head_layers", "temperature", "temperature_by_options")
+    for key in ("head_layers", "temperature_by_options")
 })
 config.update(
     architectures=["LayaForDecision"],
+    decision_temperature=settings["temperature"],
     dtype="bfloat16",
     n_act=len(settings["act_costs"]) + 1,
     mask_token_id=tokenizer.mask_token_id,
@@ -43,6 +44,10 @@ for source in [root / "model.safetensors", *(root / "tokenizer").iterdir()]:
     if source.is_file() and not destination.exists():
         destination.symlink_to(source)
 ```
+
+`decision_temperature` preserves Laya's per-question-type calibration. Transformers
+5 removes the generation field `temperature` when loading model configurations.
+Recreate older prepared configurations with this recipe to retain calibration.
 
 ## Serve and query
 

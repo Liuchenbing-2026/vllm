@@ -1,25 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Laya: an RL-agent decision model served as a vLLM pooling (``classify``) model.
+"""Laya: an RL-agent decision model served as a vLLM pooling (`classify`) model.
 
 Laya is not a generative LLM. It is a bidirectional ModernBERT encoder followed
 by a small transformer decision head. Every answer option is represented by a
-``[MASK]`` marker token in the prompt; the head scores each marker and the
+`[MASK]` marker token in the prompt; the head scores each marker and the
 softmax over those marker scores is the answer distribution. A second head
 predicts whether the agent should escalate to a human. Nothing in the model
 generates text, so there is no KV cache, no sampling and no decode phase.
 
-One request carries exactly one question, and the returned ``probs`` vector is
-``[p_0, ..., p_{K-1}, act_escalate, act_not_escalate]`` where ``K`` is the
+One request carries exactly one question, and the returned `probs` vector is
+`[p_0, ..., p_{K-1}, act_escalate, act_not_escalate]` where `K` is the
 number of options. The final two entries are the two outputs of the act head.
 
-The prompt layout (``[CLS] <type> question: <instructions> [SEP]`` followed by
-``[MASK] <option text>`` per option, then ``[SEP] <state> [SEP]``) is built by
-the client. The question type is recovered from the token right after ``[CLS]``.
+The prompt layout (`[CLS] <type> question: <instructions> [SEP]` followed by
+`[MASK] <option text>` per option, then `[SEP] <state> [SEP]`) is built by
+the client. The question type is recovered from the token right after `[CLS]`.
 
 Every numeric and structural constant below mirrors the reference
-implementation that ships with the checkpoint (``rl_common.DecisionModel`` /
-``rl_agent_api.RLAgent``). Where a value could plausibly drift between
+implementation that ships with the checkpoint (`rl_common.DecisionModel` /
+`rl_agent_api.RLAgent`). Where a value could plausibly drift between
 checkpoints it is read from the model config rather than hard-coded here.
 """
 
@@ -52,15 +52,15 @@ from .utils import maybe_prefix
 
 logger = init_logger(__name__)
 
-# The three decision primitives and their ``qtype`` index, mirroring
-# ``rl_common.QTYPES``. The index selects both the type embedding row and the
+# The three decision primitives and their `qtype` index, mirroring
+# `rl_common.QTYPES`. The index selects both the type embedding row and the
 # per-question-type temperature, so the order is part of the checkpoint format.
 QTYPE_NAMES = ("choice", "score", "noul")
 
-# Decision-head architecture, mirroring ``rl_common.DecisionModel.__init__``.
-# ``HEAD_HEAD_DIM`` is the divisor that turns the encoder width into the head's
-# attention head count (``nhead = max(1, d // 64)``), not the encoder's own
-# ``head_dim``.
+# Decision-head architecture, mirroring `rl_common.DecisionModel.__init__`.
+# `HEAD_HEAD_DIM` is the divisor that turns the encoder width into the head's
+# attention head count (`nhead = max(1, d // 64)`), not the encoder's own
+# `head_dim`.
 HEAD_HEAD_DIM = 64
 HEAD_FFN_MULTIPLIER = 4
 HEAD_DROPOUT = 0.1
@@ -72,17 +72,17 @@ ACT_FEATURE_DIM = 4
 ACT_OUTPUTS_PER_REQUEST = 2
 
 # Numeric constants of the answer distribution, mirroring
-# ``rl_common.DecisionModel.forward``.
-# Padding markers are filled with a finite sentinel rather than ``-inf``: the
-# upstream implementation uses ``-1e4`` and a finite sentinel keeps the value
+# `rl_common.DecisionModel.forward`.
+# Padding markers are filled with a finite sentinel rather than `-inf`: the
+# upstream implementation uses `-1e4` and a finite sentinel keeps the value
 # JSON-serialisable when the caller asks for raw logits
-# (``use_activation=False``).
+# (`use_activation=False`).
 ANSWER_MASK_LOGIT = -1e4
 ENTROPY_EPSILON = 1e-9
 OPTION_COUNT_SCALE = 255.0
 MIN_OPTIONS_FOR_ENTROPY = 2
 
-# Deployment knobs (overridable from the model config, see ``LayaForDecision``).
+# Deployment knobs (overridable from the model config, see `LayaForDecision`).
 # A served batch draws its rows from a handful of prompt shapes, so a small
 # cache of the per-step bookkeeping removes nearly all of the rebuilding while
 # keeping memory bounded. Plan entries are tiny (a few hundred bytes of device
@@ -98,7 +98,7 @@ def _resolve_fused_attention():
     """The packed (TND) fused attention op, or None off Ascend.
 
     Resolved once per model instance so that importing this module stays
-    platform-agnostic: the reference fallback in ``_packed_attention`` is used
+    platform-agnostic: the reference fallback in `_packed_attention` is used
     wherever the fused operator is unavailable.
     """
     try:
@@ -118,8 +118,8 @@ def _packed_attention(
 ) -> torch.Tensor:
     """Per-sequence attention over a packed token batch, portable reference.
 
-    ``query``/``key``/``value`` are ``[num_tokens, head_num, head_dim]`` and
-    ``seq_lens`` holds the cumulative length of each request, so the batch is
+    `query`/`key`/`value` are `[num_tokens, head_num, head_dim]` and
+    `seq_lens` holds the cumulative length of each request, so the batch is
     the concatenation of the step's prompts. A block-diagonal mask reproduces
     the TND semantics of the fused operator: tokens only attend inside their own
     request, which is the key-padding mask it replaces.
@@ -138,7 +138,7 @@ def _packed_attention(
 
 
 def _exclusive_prefix(counts: np.ndarray) -> np.ndarray:
-    """``[0, c0, c0 + c1, ...]``: the flat start offset of every row."""
+    """`[0, c0, c0 + c1, ...]`: the flat start offset of every row."""
     out = np.zeros(counts.size, dtype=np.int64)
     np.cumsum(counts[:-1], out=out[1:])
     return out
@@ -161,7 +161,7 @@ def _new_pinned(numel: int, dtype: torch.dtype) -> torch.Tensor:
 
 
 def _temperature_bucket(qtype_name: str, num_options: int) -> str:
-    """Mirror of ``rl_common.temp_bucket``: the per-cardinality temperature key."""
+    """Mirror of `rl_common.temp_bucket`: the per-cardinality temperature key."""
     if num_options <= 2:
         size = "2"
     elif num_options <= 5:
@@ -174,7 +174,7 @@ def _temperature_bucket(qtype_name: str, num_options: int) -> str:
 
 
 class LayaPooler(Pooler):
-    """Scores the ``[MASK]`` markers of every request and returns Laya's outputs."""
+    """Scores the `[MASK]` markers of every request and returns Laya's outputs."""
 
     def __init__(
         self,
@@ -217,7 +217,7 @@ class LayaPooler(Pooler):
 @attn_type("encoder_only")
 @default_pooling_type(seq_pooling_type="CLS")
 class LayaForDecision(nn.Module):
-    """Laya decision model, served with the ``classify`` pooling task."""
+    """Laya decision model, served with the `classify` pooling task."""
 
     is_pooling_model = True
 
@@ -276,9 +276,10 @@ class LayaForDecision(nn.Module):
         # unused at inference; the fitted values live in
         # `temperature_by_options` and `temperature` (per question type), and are
         # applied exactly as `rl_agent_api.RLAgent.system_one` applies them.
-        self.temperature = [
-            float(value) for value in getattr(config, "temperature", None) or []
-        ]
+        temperatures = getattr(
+            config, "decision_temperature", getattr(config, "temperature", None)
+        )
+        self.temperature = [float(value) for value in temperatures or []]
         self.temperature_by_options = {
             str(key): float(value)
             for key, value in (
@@ -320,11 +321,11 @@ class LayaForDecision(nn.Module):
         """Resolve the marker token and the question-type token map.
 
         Both are part of the prompt convention rather than of the encoder
-        weights, so a prepared serving directory carries them in ``config.json``.
+        weights, so a prepared serving directory carries them in `config.json`.
         When they are absent they are derived from the tokenizer exactly the way
-        the prompt builder derives them: ``[MASK]`` marks an option, and the
-        first token of ``"<type> question: "`` is the type token that follows
-        ``[CLS]``.
+        the prompt builder derives them: `[MASK]` marks an option, and the
+        first token of `"<type> question: "` is the type token that follows
+        `[CLS]`.
         """
         mask_token_id = getattr(config, "mask_token_id", None)
         type_token_ids = getattr(config, "type_token_ids", None)
@@ -371,7 +372,7 @@ class LayaForDecision(nn.Module):
         }
 
     def _qtype_of(self, ids: torch.Tensor) -> int:
-        """Question type of a request, from the token that follows ``[CLS]``."""
+        """Question type of a request, from the token that follows `[CLS]`."""
         if ids.numel() < 2:
             return 0
         return self.type_token_ids.get(int(ids[1]), 0)
@@ -634,7 +635,7 @@ class LayaForDecision(nn.Module):
     ) -> list[torch.Tensor]:
         """Score every request of one engine step with a single head batch.
 
-        Pad the requests into one ``(n, maxlen, d)`` batch. The attention mask
+        Pad the requests into one `(n, maxlen, d)` batch. The attention mask
         excludes padded positions, and the remaining head operations apply
         independently at each position.
         """
