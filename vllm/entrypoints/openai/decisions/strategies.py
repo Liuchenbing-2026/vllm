@@ -1733,7 +1733,7 @@ class StartLuxStrategy(D3Strategy):
         # loses score/predicate temperatures and their distinct prompt format.
         if isinstance(question, PredicateQuestion):
             kind = "noul"
-            options = [Option("no"), Option("yes")]
+            options = [Option("yes"), Option("no")]
         elif isinstance(question, ChoiceQuestion):
             kind = "choice"
             options = [

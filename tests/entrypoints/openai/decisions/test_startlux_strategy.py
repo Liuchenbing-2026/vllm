@@ -153,7 +153,12 @@ def test_native_read_restricts_candidates_then_calibrates():
         )
 
     reader.context.engine_client.encode = encode
-    questions = [question("choice", ["x", "y"]), question("noul", ["yes", "no"])]
+    predicate = PredicateQuestion(type="predicate", instructions="Is it safe?")
+    questions = [
+        question("choice", ["x", "y"]),
+        question("noul", ["yes", "no"]),
+        reader.make_question(0, predicate),
+    ]
     result = asyncio.run(
         reader.read(
             questions,
@@ -165,12 +170,15 @@ def test_native_read_restricts_candidates_then_calibrates():
             priority=0,
         )
     )
-    for read, temperature in zip(result, [2.0, 1.0]):
+    for read, temperature in zip(result, [2.0, 1.0, 1.0]):
         expected = torch.softmax(
             torch.tensor([0.0, 2.0], dtype=torch.float64) / temperature, 0
         )
         assert read.probs == pytest.approx(expected.tolist())
         assert read.output_tokens == 0
+    assert make_answer(predicate, result[2].probs, 1.0).probability == pytest.approx(
+        torch.softmax(torch.tensor([0.0, 2.0], dtype=torch.float64), 0)[0].item()
+    )
     d3 = D3Strategy.__new__(D3Strategy)
     d3.temperature = 1.75
     assert d3._temperature(questions[0]) == 1.75
@@ -182,8 +190,8 @@ def test_api_conversion_preserves_types_and_probability_order():
     q = reader.make_question(0, predicate)
     assert q.type.name == "noul"
     texts, order = reader._options(q)
-    assert texts == ["yes", "no"] and order == [1, 0]
-    # The model reads yes/no, while the public API expects false/true.
+    assert texts == ["yes", "no"] and order == [0, 1]
+    # Both the model and the public API adapter use yes/no order.
     probs = [0.8, 0.2]
     result = make_answer(predicate, [probs[i] for i in order], 1.0)
     assert result.probability == pytest.approx(0.8)
@@ -215,7 +223,7 @@ def test_api_conversion_preserves_types_and_probability_order():
     d3.codes = list("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
     actual = d3.make_question(0, predicate)
     expected = make_read_question(0, predicate, 26)
-    assert actual.type.name == expected.type.name == "choice"
+    assert actual.type.name == expected.type.name == "noul"
     assert (actual.id, actual.instructions, actual.options, actual.labels) == (
         expected.id,
         expected.instructions,

@@ -48,7 +48,8 @@ The current upstream route is `/v1/decisions`, not the historical independent
 `/v1/systemone` example. Choice supports 2–26 distinct single-line values;
 score supports 2–10 ordered levels. A score level with a distinct description
 is rendered as `label: description`. Predicate prompts use the trained yes/no
-order and map the probabilities back to the public API's true probability.
+order. The public predicate probability is the first (yes) probability, without
+inverting the yes/no order.
 Each question is a separate classify read. Input over the configured maximum
 length is rejected rather than truncated.
 
