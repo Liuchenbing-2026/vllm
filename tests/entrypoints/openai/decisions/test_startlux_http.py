@@ -56,7 +56,7 @@ def decision_server():
 
 def test_native_decisions_contract(decision_server):
     """The real route must preserve answer types, mappings and token accounting."""
-    server, tokenizer, _ = decision_server
+    server, tokenizer, temperatures = decision_server
     state = "A customer was charged twice. They request a refund. Nobody is in danger."
     questions = [
         {
@@ -137,6 +137,23 @@ def test_native_decisions_contract(decision_server):
     assert body["usage"]["input_tokens"] == sum(map(len, ids))
     assert body["usage"]["output_tokens"] == 0
     assert body["usage"]["total_tokens"] == sum(map(len, ids))
+
+    # Compare the public true probability with an independent yes/no label read.
+    reference = requests.post(
+        server.url_for("classify"),
+        json={
+            "model": "startlux-decision",
+            "input": ids[1],
+            "use_activation": False,
+        },
+        timeout=45,
+    )
+    assert reference.status_code == 200, reference.text
+    logits = reference.json()["data"][0]["probs"][:2]
+    scaled = [value / temperatures["noul"] for value in logits]
+    weights = [math.exp(value - max(scaled)) for value in scaled]
+    yes_probability = weights[0] / sum(weights)
+    assert body["answers"][1]["probability"] == pytest.approx(yes_probability)
 
 
 @pytest.mark.parametrize("case", ["joint", "too_many_choices", "too_many_levels"])
