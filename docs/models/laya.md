@@ -11,26 +11,12 @@ such as `v0.32.0rc1` do not include this model architecture or newer core
 APIs. On Ascend, pair this tree with a matching `vllm-ascend` `main` checkout
 whose `.github/vllm-main-verified.commit` aligns with the vLLM baseline.
 
-If you overlay or mount a post-`v0.32.0` vLLM source tree onto an older
-trimmed container image instead of building a fresh main image:
-
-1. **Additional Python dependencies**: vLLM `main` imports runtime packages
-   listed in `requirements/common.txt` that may be absent from older images
-   (notably `orjson>=3.11.6`, imported by the API server utilities). Install
-   missing pure-Python packages with `--no-deps` (for example,
-   `pip install --no-deps orjson`) rather than running an unrestricted
-   reinstall that could upgrade `torch` or break binary compatibility.
-2. **Ascend version gate (`VLLM_VERSION`)**: When `vllm` package metadata in
-   the container remains at `0.32.0*` (or falls back to `dev`), `vllm-ascend`
-   version checks such as `vllm_version_is("0.32.0")` can route imports to
-   removed release paths (for example `kv_cache_utils.create_kv_cache_group_specs`
-   instead of `kv_cache_planning`). Export a PEP 440 `main`-lane version
-   string that matches neither `0.32.0` nor `0.33.0` before both
-   `vllm-ascend` installation and `vllm serve`:
-
-   ```bash
-   export VLLM_VERSION=0.32.1.dev1
-   ```
+Build and install the selected source revisions using the platform's documented
+installation procedure. Resolve dependencies from those revisions with the
+platform's constraints, and check the installed packages with `uv pip check`.
+Verify the package versions and runtime import paths before serving; mounting
+new source files over an older installed package does not establish a compatible
+installation. Do not override version metadata to bypass compatibility checks.
 
 ## Prepare the checkpoint
 
@@ -53,10 +39,11 @@ config = json.loads((root / "encoder/config.json").read_text())
 tokenizer = AutoTokenizer.from_pretrained(root / "tokenizer")
 config.update({
     key: settings[key]
-    for key in ("head_layers", "temperature", "temperature_by_options")
+    for key in ("head_layers", "temperature_by_options")
 })
 config.update(
     architectures=["LayaForDecision"],
+    decision_temperature=settings["temperature"],
     dtype="bfloat16",
     n_act=len(settings["act_costs"]) + 1,
     mask_token_id=tokenizer.mask_token_id,
@@ -71,6 +58,10 @@ for source in [root / "model.safetensors", *(root / "tokenizer").iterdir()]:
     if source.is_file() and not destination.exists():
         destination.symlink_to(source)
 ```
+
+`decision_temperature` preserves Laya's per-question-type calibration. Transformers
+5 removes the generation field `temperature` when loading model configurations.
+Recreate older prepared configurations with this recipe to retain calibration.
 
 ## Serve and query
 
@@ -95,6 +86,6 @@ encoder can run in BF16. Preserve the checkpoint's per-type and per-option
 count temperatures when comparing against its original `RLAgent` reference.
 
 Graph execution depends on the platform's encoder attention implementation.
-Ascend validation covers Eager and PIECEWISE with six short/long text cases
-against the original CPU FP32 reference; it does not establish leaderboard
-accuracy or multimodal support.
+Validate the selected framework revisions and execution mode against the original
+`RLAgent` reference before deployment, including short and long prompts. Results
+from another revision or execution mode do not validate the installed combination.

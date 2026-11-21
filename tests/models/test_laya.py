@@ -2,24 +2,23 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """CPU unit tests for the parts of the Laya decision model that are not the encoder.
 
-Laya cannot be pulled from the Hub: its checkpoints ship ``rl_agent_config.json``
-plus a nested ``encoder/config.json`` instead of a single HF ``config.json``, so
+Laya cannot be pulled from the Hub: its checkpoints ship `rl_agent_config.json`
+plus a nested `encoder/config.json` instead of a single HF `config.json`, so
 the end-to-end path is exercised by the serving recipe rather than by an
-``example_models`` download. Everything that a silent refactor could break --
+`example_models` download. Everything that a silent refactor could break --
 the temperature lookup, the marker/question-type resolution and, above all, the
 batched head's index bookkeeping -- is covered here on CPU.
 """
 
 import math
-from collections import OrderedDict
 
 import numpy as np
 import pytest
 import torch
-import torch.nn as nn
+from transformers import ModernBertConfig
 
+from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
 from vllm.model_executor.models.laya import (
-    ACT_FEATURE_DIM,
     ANSWER_MASK_LOGIT,
     MIN_OPTIONS_FOR_ENTROPY,
     OPTION_COUNT_SCALE,
@@ -30,11 +29,9 @@ from vllm.model_executor.models.laya import (
     _packed_attention,
     _temperature_bucket,
 )
-
-# Everything here runs on CPU without touching a device, and the shared
-# `cleanup_dist_env_and_memory` teardown trips over the NPU allocator on
-# non-CUDA builds, so opt out of the global cleanup.
-pytestmark = pytest.mark.skip_global_cleanup
+from vllm.pooling_params import PoolingParams
+from vllm.utils.torch_utils import set_default_torch_dtype
+from vllm.v1.pool.metadata import PoolingMetadata, PoolingStates
 
 
 @pytest.mark.parametrize(
@@ -108,59 +105,72 @@ def test_packed_attention_never_crosses_a_sequence_boundary():
     assert not torch.equal(moved[cumulative[1] :], packed[cumulative[1] :])
 
 
-def _fake_model(
-    *,
-    hidden_size=8,
-    head_layers=1,
-    mask_token_id=7,
-    type_token_ids=None,
-    temperature=None,
-    temperature_by_options=None,
-    plan_cache_limit=4,
-    pinned_min_elements=8,
-):
-    """A Laya decision head with tiny random weights; no encoder, no device."""
-    model = LayaForDecision.__new__(LayaForDecision)
-    # `__new__` skips `nn.Module.__init__`, which is what creates `_modules`.
-    nn.Module.__init__(model)
-    model.head_dtype = torch.float32
-    model.mask_token_id = mask_token_id
-    model.type_token_ids = (
-        type_token_ids if type_token_ids is not None else {1: 0, 2: 1, 3: 2}
-    )
-    torch.manual_seed(1234)
-    layer = nn.TransformerEncoderLayer(
-        hidden_size, 1, 4 * hidden_size, 0.0, batch_first=True, norm_first=True
-    )
-    model.head = nn.TransformerEncoder(layer, head_layers, enable_nested_tensor=False)
-    model.type_emb = nn.Embedding(len(QTYPE_NAMES), hidden_size)
-    model.scorer = nn.Sequential(
-        nn.LayerNorm(hidden_size),
-        nn.Linear(hidden_size, hidden_size),
-        nn.GELU(),
-        nn.Linear(hidden_size, 1),
-    )
-    model.act_head = nn.Sequential(
-        nn.Linear(hidden_size + ACT_FEATURE_DIM, 16),
-        nn.GELU(),
-        nn.Linear(16, 2),
-    )
-    model.temperature = list(temperature or [])
-    model.temperature_by_options = dict(temperature_by_options or {})
-    model._plan_cache = OrderedDict()
-    model._plan_cache_limit = plan_cache_limit
-    model._plan_host = {}
-    model._pinned_min_elements = pinned_min_elements
-    model._fused_attention = None
-    model.eval()
-    return model
+@pytest.fixture
+def make_laya(tmp_path_factory, dist_init):
+    """Construct the real model with a tiny local config and random weights."""
+
+    def make_model(
+        *,
+        hidden_size=8,
+        head_layers=1,
+        head_dtype="float32",
+        mask_token_id=7,
+        type_token_ids=None,
+        temperature=None,
+        temperature_by_options=None,
+        plan_cache_limit=4,
+        pinned_min_elements=8,
+    ):
+        tmp_path = tmp_path_factory.mktemp("laya")
+        token_map = type_token_ids or {1: 0, 2: 1, 3: 2}
+        ModernBertConfig(
+            architectures=["LayaForDecision"],
+            vocab_size=128,
+            hidden_size=hidden_size,
+            intermediate_size=4 * hidden_size,
+            num_hidden_layers=1,
+            num_attention_heads=1,
+            max_position_embeddings=128,
+            head_layers=head_layers,
+            head_dtype=head_dtype,
+            mask_token_id=mask_token_id,
+            pad_token_id=0,
+            bos_token_id=9,
+            cls_token_id=9,
+            eos_token_id=10,
+            sep_token_id=10,
+            type_token_ids={
+                QTYPE_NAMES[index]: token for token, index in token_map.items()
+            },
+            decision_temperature=temperature,
+            temperature_by_options=temperature_by_options,
+            plan_cache_limit=plan_cache_limit,
+            pinned_buffer_min_elements=pinned_min_elements,
+        ).save_pretrained(tmp_path)
+        model_config = ModelConfig(
+            model=str(tmp_path),
+            runner="pooling",
+            dtype="float32",
+            skip_tokenizer_init=True,
+            enforce_eager=True,
+            max_model_len=128,
+        )
+        config = VllmConfig(model_config=model_config)
+        torch.manual_seed(1234)
+        with (
+            set_default_torch_dtype(model_config.dtype),
+            set_current_vllm_config(config),
+        ):
+            return LayaForDecision(vllm_config=config).eval()
+
+    return make_model
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("packed", [False, True])
-def test_action_head_accepts_configured_low_precision(dtype, packed):
-    model = _fake_model().to(dtype=dtype)
-    model.head_dtype = dtype
+def test_action_head_accepts_configured_low_precision(make_laya, dtype, packed):
+    model = make_laya(head_dtype=str(dtype).removeprefix("torch."))
+    assert model.head_dtype == dtype
     ids = [torch.tensor([99, 1, 7, 4, 7, 5])]
     hidden = torch.randn(6, 8).to(dtype)
     score = model.score_requests if packed else model._score_requests_scalar
@@ -171,8 +181,8 @@ def test_action_head_accepts_configured_low_precision(dtype, packed):
     assert (result >= 0).all() and (result <= 1).all()
 
 
-def test_qtype_and_temperature_resolution():
-    model = _fake_model(
+def test_qtype_and_temperature_resolution(make_laya):
+    model = make_laya(
         type_token_ids={1: 0, 11: 1, 12: 2},
         temperature=[1.5, 2.5, 3.5],
         temperature_by_options={"choice:11+": 0.1, "noul:2": 9.0},
@@ -190,7 +200,7 @@ def test_qtype_and_temperature_resolution():
     assert model._answer_temperature(0, 11) == 0.1
     assert model._answer_temperature(2, 2) == 9.0
     assert model._answer_temperature(1, 3) == 2.5
-    assert _fake_model()._answer_temperature(0, 3) == 1.0
+    assert make_laya()._answer_temperature(0, 3) == 1.0
 
 
 def test_qtype_map_ignores_unknown_names():
@@ -210,8 +220,8 @@ def _step_inputs(model, prompts):
     return hidden, offsets, prompts, [True] * len(prompts)
 
 
-def test_step_plan_marks_the_marker_rows_and_skips_the_padding():
-    model = _fake_model(hidden_size=6, mask_token_id=7)
+def test_step_plan_marks_the_marker_rows_and_skips_the_padding(make_laya):
+    model = make_laya(hidden_size=6, mask_token_id=7)
     prompts = [
         torch.tensor([1, 11, 7, 12, 7]),
         torch.tensor([1, 12, 7]),
@@ -256,8 +266,8 @@ def test_step_plan_marks_the_marker_rows_and_skips_the_padding():
     assert plan["gather"].tolist() == [0, 1, 4, 5, 2, 6, 7]
 
 
-def test_step_plan_is_cached_by_batch_shape_and_stays_bounded():
-    model = _fake_model(hidden_size=6, plan_cache_limit=2)
+def test_step_plan_is_cached_by_batch_shape_and_stays_bounded(make_laya):
+    model = make_laya(hidden_size=6, plan_cache_limit=2)
     prompt = torch.tensor([1, 11, 7, 12, 7])
 
     def plan_for(ids_list):
@@ -277,8 +287,8 @@ def test_step_plan_is_cached_by_batch_shape_and_stays_bounded():
     assert len(model._plan_cache) <= model._plan_cache_limit
 
 
-def test_prompts_without_markers_take_the_scalar_path():
-    model = _fake_model(hidden_size=6)
+def test_prompts_without_markers_take_the_scalar_path(make_laya):
+    model = make_laya(hidden_size=6)
     prompt = torch.tensor([1, 11, 12])  # no [MASK] at all
     hidden, offsets, prompt_ids, use_act = _step_inputs(model, [prompt])
 
@@ -289,12 +299,13 @@ def test_prompts_without_markers_take_the_scalar_path():
     assert out[0].shape == (2,)
 
 
-def test_batched_and_scalar_paths_agree():
+def test_batched_and_scalar_paths_agree(make_laya):
     # Both paths must be interchangeable: the batched one is the fast path for a
     # well-formed step, the scalar one answers malformed requests.
+    previous_fastpath = torch.backends.mha.get_fastpath_enabled()
     torch.backends.mha.set_fastpath_enabled(False)  # compare the math, not MHA's kernel
     try:
-        model = _fake_model(
+        model = make_laya(
             hidden_size=6,
             temperature=[1.7, 1.2, 2.0],
             temperature_by_options={"choice:2": 0.5},
@@ -317,13 +328,14 @@ def test_batched_and_scalar_paths_agree():
             for got, want in zip(batched, scalar):
                 torch.testing.assert_close(got, want, atol=1e-5, rtol=1e-5)
     finally:
-        torch.backends.mha.set_fastpath_enabled(True)
+        torch.backends.mha.set_fastpath_enabled(previous_fastpath)
 
 
-def test_batched_answers_match_the_scalar_probabilities():
+def test_batched_answers_match_the_scalar_probabilities(make_laya):
+    previous_fastpath = torch.backends.mha.get_fastpath_enabled()
     torch.backends.mha.set_fastpath_enabled(False)
     try:
-        model = _fake_model(hidden_size=6, mask_token_id=7)
+        model = make_laya(hidden_size=6, mask_token_id=7)
         prompt = torch.tensor([1, 11, 7, 12, 7, 13, 7])
         hidden, offsets, prompt_ids, use_act = _step_inputs(model, [prompt])
 
@@ -337,15 +349,16 @@ def test_batched_answers_match_the_scalar_probabilities():
         )
         torch.testing.assert_close(act.sum(), torch.tensor(1.0), atol=1e-5, rtol=1e-5)
     finally:
-        torch.backends.mha.set_fastpath_enabled(True)
+        torch.backends.mha.set_fastpath_enabled(previous_fastpath)
 
 
-def test_single_option_request_matches_the_scalar_margin():
+def test_single_option_request_matches_the_scalar_margin(make_laya):
     # `topk(2)` would index out of range for a one-option request, which is
     # exactly the step that used to kill the EngineCore on Ascend.
+    previous_fastpath = torch.backends.mha.get_fastpath_enabled()
     torch.backends.mha.set_fastpath_enabled(False)
     try:
-        model = _fake_model(hidden_size=6, mask_token_id=7)
+        model = make_laya(hidden_size=6, mask_token_id=7)
         prompts = [torch.tensor([1, 11, 7, 12]), torch.tensor([1, 12, 7])]
         hidden, offsets, prompt_ids, use_act = _step_inputs(model, prompts)
 
@@ -355,7 +368,7 @@ def test_single_option_request_matches_the_scalar_margin():
         for got, want in zip(batched, scalar):
             torch.testing.assert_close(got, want, atol=1e-5, rtol=1e-5)
     finally:
-        torch.backends.mha.set_fastpath_enabled(True)
+        torch.backends.mha.set_fastpath_enabled(previous_fastpath)
 
 
 def test_answer_padding_uses_a_finite_sentinel():
@@ -378,3 +391,39 @@ def test_entropy_and_option_count_features_match_the_scalar_formula():
     entropy = -(probs * torch.log(probs.clamp_min(1e-9))).sum() / math.log(num_options)
     assert 0.0 <= float(entropy) <= 1.0
     assert num_options / OPTION_COUNT_SCALE == pytest.approx(0.02745, abs=1e-5)
+
+
+def test_pooler_preserves_request_boundaries_and_answer_probabilities(make_laya):
+    model = make_laya(hidden_size=64)
+    assert model.mask_token_id == 7
+    assert model.type_token_ids == {1: 0, 2: 1, 3: 2}
+    assert model.pooler.get_supported_tasks() == {"classify"}
+    assert model.pooler.get_pooling_updates("classify").requires_token_ids
+    token_ids = [torch.tensor([9, 1, 7, 4, 7, 5]), torch.tensor([9, 3, 7, 6])]
+    lengths = [6, 4]
+    metadata = PoolingMetadata(
+        prompt_lens=torch.tensor(lengths),
+        prompt_token_ids=None,
+        prompt_token_ids_cpu=torch.nn.utils.rnn.pad_sequence(
+            token_ids, batch_first=True, padding_value=0
+        ),
+        pooling_params=[
+            PoolingParams(task="classify", use_activation=True) for _ in lengths
+        ],
+        pooling_states=[PoolingStates() for _ in lengths],
+    )
+    metadata.build_pooling_cursor(
+        np.asarray(lengths, dtype=np.int32), torch.tensor(lengths), torch.device("cpu")
+    )
+    hidden_states = torch.randn(10, 64)
+    with torch.inference_mode():
+        actual = model.pooler(hidden_states, metadata)
+        scalar = model._score_requests_scalar(
+            hidden_states, [0, 6, 10], token_ids, [True, True]
+        )
+    assert [x.shape for x in actual] == [torch.Size([4]), torch.Size([3])]
+    for result, expected in zip(actual, scalar):
+        assert result.dtype == torch.float32
+        assert torch.isfinite(result).all()
+        torch.testing.assert_close(result[:-2].sum(), torch.tensor(1.0))
+        torch.testing.assert_close(result, expected, atol=1e-5, rtol=1e-5)
