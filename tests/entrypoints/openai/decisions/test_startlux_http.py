@@ -4,24 +4,23 @@
 
 import json
 import math
-from pathlib import Path
+from typing import Any
 
 import pytest
 import requests
-from huggingface_hub import hf_hub_download
 from transformers import AutoTokenizer
 
 from tests.utils import RemoteOpenAIServer
+from vllm.transformers_utils.repo_utils import get_hf_file_to_dict
 
 
 @pytest.fixture(scope="module")
 def decision_server():
     model = "startlux-models/StartLux-Decision-4B"
     tokenizer = AutoTokenizer.from_pretrained(model)
-    metadata = Path(model) / "decision_config.json"
-    if not metadata.is_file():
-        metadata = Path(hf_hub_download(model, "decision_config.json"))
-    temperatures = json.loads(metadata.read_text())["temperature_by_type"]
+    metadata = get_hf_file_to_dict("decision_config.json", model)
+    assert metadata is not None
+    temperatures = metadata["temperature_by_type"]
     args = [
         "--served-model-name",
         "startlux-decision",
@@ -58,7 +57,7 @@ def test_native_decisions_contract(decision_server):
     """The real route must preserve answer types, mappings and token accounting."""
     server, tokenizer, temperatures = decision_server
     state = "A customer was charged twice. They request a refund. Nobody is in danger."
-    questions = [
+    questions: list[dict[str, Any]] = [
         {
             "type": "choice",
             "name": "team",

@@ -10,7 +10,6 @@ import hashlib
 import json
 import math
 import random
-import re
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
@@ -19,6 +18,7 @@ from functools import cached_property, partial
 from typing import Any, ClassVar, TypeVar
 
 import numpy as np
+import regex as re
 import torch
 from PIL import Image
 
@@ -1336,7 +1336,7 @@ class D3Strategy(ReadStrategy):
         return self.tokenizer.encode(text, add_special_tokens=False)
 
     def _encode(self, text: str, state: str) -> tuple[list[int], int]:
-        """``text``'s tokens and, for prefix_bidir checkpoints, how many lead
+        """`text`'s tokens and, for prefix_bidir checkpoints, how many lead
         tokens are its state block: those that end by the end of the state text,
         so a token straddling it belongs to the question block."""
         if not self.state_blocks:
@@ -1800,7 +1800,7 @@ class StartLuxStrategy(D3Strategy):
             o.description.strip() if o.description else None for o in q.options
         ]
         if kind == "score":
-            descriptions = names
+            descriptions = list(names)
             names = [str(i) for i in range(len(names))]
         order = list(range(len(names)))
         if kind == "noul":
@@ -1836,13 +1836,14 @@ class StartLuxStrategy(D3Strategy):
                 and re.sub(r"[\s_\-]+", " ", description).strip().lower()
                 == re.sub(r"[\s_\-]+", " ", name).strip().lower()
             )
-            texts.append(
-                description
-                if hide_names
-                else name
-                if not description or same
-                else f"{name}: {description}"
-            )
+            if hide_names:
+                assert description is not None
+                text = description
+            elif not description or same:
+                text = name
+            else:
+                text = f"{name}: {description}"
+            texts.append(text)
         return texts, order
 
     def _chat_prompt(self, state: str, instructions: str, lines: list[str]) -> str:

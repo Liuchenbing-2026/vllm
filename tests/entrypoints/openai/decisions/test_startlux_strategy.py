@@ -13,6 +13,7 @@ import torch
 from vllm.entrypoints.openai.decisions.adapters import make_answer, make_read_question
 from vllm.entrypoints.openai.decisions.protocol import (
     ChoiceQuestion,
+    PredicateAnswer,
     PredicateQuestion,
     ScoreQuestion,
 )
@@ -176,7 +177,9 @@ def test_native_read_restricts_candidates_then_calibrates():
         )
         assert read.probs == pytest.approx(expected.tolist())
         assert read.output_tokens == 0
-    assert make_answer(predicate, result[2].probs, 1.0).probability == pytest.approx(
+    answer = make_answer(predicate, result[2].probs, 1.0)
+    assert isinstance(answer, PredicateAnswer)
+    assert answer.probability == pytest.approx(
         torch.softmax(torch.tensor([0.0, 2.0], dtype=torch.float64), 0)[0].item()
     )
     d3 = D3Strategy.__new__(D3Strategy)
@@ -194,6 +197,7 @@ def test_api_conversion_preserves_types_and_probability_order():
     # Both the model and the public API adapter use yes/no order.
     probs = [0.8, 0.2]
     result = make_answer(predicate, [probs[i] for i in order], 1.0)
+    assert isinstance(result, PredicateAnswer)
     assert result.probability == pytest.approx(0.8)
     assert reader._temperature(q) == 1.0
 
@@ -270,11 +274,11 @@ def test_native_state_initializes_only_supported_openai_strategies(
     from vllm.entrypoints.openai.decisions.state import init_decisions_state
 
     reader = strategy() if kind == "startlux" else object.__new__(D3Strategy)
-    reader.task = task
     state = SimpleNamespace(online_renderer=object(), openai_serving_models=object())
     args = SimpleNamespace(chat_template_content_format="auto")
     engine = SimpleNamespace(model_config=object())
     with (
+        patch.object(type(reader), "task", task),
         patch(
             "vllm.entrypoints.openai.decisions.state.select_read_strategy",
             return_value=lambda context: reader,
